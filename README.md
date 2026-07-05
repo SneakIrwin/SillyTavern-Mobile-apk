@@ -69,6 +69,8 @@ update/SillyTavern-Mobile-debug.apk
 
 When the app sees a higher `versionCode` in `latest.json`, Android will still ask before installing. If Android has not allowed this app to install unknown apps yet, the app opens the standard settings page and retries on the next launch.
 
+The GitHub repository must remain public for this no-credentials update channel. The APK does not embed a GitHub token.
+
 Run tests:
 
 ```powershell
