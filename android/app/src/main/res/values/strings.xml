@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SillyTavern Mobile</string>
+    <string name="pairing_link_hint">Pairing link</string>
+    <string name="pair_button">Pair</string>
+    <string name="forget_button">Forget</string>
+    <string name="not_paired">Not paired</string>
+    <string name="invalid_pairing_link">Invalid pairing link</string>
+    <string name="update_ready">SillyTavern Mobile %1$s is ready to install</string>
+    <string name="update_install_permission_needed">Allow SillyTavern Mobile to install updates, then reopen the app</string>
+    <string name="update_install_failed">Update install could not start</string>
+    <string name="update_verify_failed">Downloaded update did not pass verification</string>
+</resources>

@@ -1,0 +1,11 @@
+{
+  "name": "sillytavern-secure-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "npm --prefix gateway test && npm run test:android-static && npm run test:desktop-static",
+    "test:android-static": "node --test quality/android-static.test.mjs",
+    "test:desktop-static": "node --test quality/desktop-static.test.mjs"
+  }
+}

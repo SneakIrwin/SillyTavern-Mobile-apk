@@ -1,0 +1,15 @@
+{
+  "name": "sillytavern-secure-mobile-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Secure LAN HTTPS pairing gateway for SillyTavern mobile WebView access.",
+  "main": "src/cli.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "node-forge": "^1.3.1",
+    "qrcode": "^1.5.4"
+  }
+}

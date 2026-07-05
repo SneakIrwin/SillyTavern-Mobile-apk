@@ -1,0 +1,40 @@
+# Local toolchains and dependency installs
+.tools/
+gateway/node_modules/
+node_modules/
+
+# Android and Gradle build output
+android/.gradle/
+android/build/
+android/app/build/
+**/build/
+
+# Local runtime state and private material
+state/
+logs/
+tmp/
+scratch/
+*.log
+
+# Local Codex/admin relay artifacts that do not belong in the public APK repo
+docs/council/*.md
+docs/superpowers/plans/*.md
+docs/council/records.md
+docs/council/admin-default-*.md
+docs/council/windows-admin-relay-*.md
+scripts/AdminRelay-Broker.ps1
+scripts/Invoke-AdminRelay.ps1
+scripts/Restart-CodexElevated.*
+scripts/Enable-CodexBackendRunAsAdminExperiment.ps1
+scripts/Disable-CodexBackendRunAsAdminExperiment.ps1
+scripts/Ensure-AppxRunAsAdmin.ps1
+scripts/Install-CodexAdminDefault.ps1
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+
+# Keep the Git-backed update channel committed.
+!update/
+!update/latest.json
+!update/SillyTavern-Mobile-debug.apk
