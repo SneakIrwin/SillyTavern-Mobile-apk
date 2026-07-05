@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "npm --prefix gateway test && npm run test:android-static && npm run test:desktop-static",
+    "test": "npm --prefix gateway test && npm run test:android-static && npm run test:desktop-static && npm run test:license-static",
     "test:android-static": "node --test quality/android-static.test.mjs",
-    "test:desktop-static": "node --test quality/desktop-static.test.mjs"
+    "test:desktop-static": "node --test quality/desktop-static.test.mjs",
+    "test:license-static": "node --test quality/license-static.test.mjs"
   }
 }

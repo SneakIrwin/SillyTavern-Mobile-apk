@@ -71,6 +71,12 @@ When the app sees a higher `versionCode` in `latest.json`, Android will still as
 
 The GitHub repository must remain public for this no-credentials update channel. The APK does not embed a GitHub token.
 
+## License
+
+This project is licensed under the GNU Affero General Public License v3.0 to match SillyTavern. See `LICENSE`.
+
+SillyTavern-Launcher is MIT licensed; its notice is preserved in `LICENSES/SillyTavern-Launcher-MIT.txt`. See `NOTICE.md` for upstream attribution and source-location notes.
+
 Run tests:
 
 ```powershell
