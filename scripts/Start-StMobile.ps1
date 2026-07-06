@@ -1,5 +1,6 @@
 param(
     [int]$Port = 38443,
+    [int]$HubPort = 38444,
     [string]$SillyTavernRoot = 'C:\Users\Sneak\SillyTavern-Launcher\SillyTavern-Launcher\SillyTavern',
     [switch]$NoStartSillyTavern
 )
@@ -13,6 +14,7 @@ $LogRoot = Join-Path $ProjectRoot 'logs'
 $StateRoot = Join-Path $ProjectRoot 'state'
 $CertRoot = Join-Path $StateRoot 'certs'
 $GatewayPidFile = Join-Path $StateRoot 'gateway.pid'
+$HubUrlFile = Join-Path $StateRoot 'auth-hub.url'
 $SillyTavernPidFile = Join-Path $StateRoot 'sillytavern.pid'
 $ProtectCertAcls = Join-Path $ProjectRoot 'scripts\Protect-CertAcls.ps1'
 $FirewallRuleName = 'SillyTavern Secure Mobile Gateway'
@@ -356,6 +358,12 @@ function Assert-GatewayListenerExpected {
     if ($actualHost -ne $PublicHost) {
         throw "Gateway port $Port is pinned to $actualHost instead of expected public host $PublicHost in PID $($listener.OwningProcess): $commandLine"
     }
+    if ($commandLine -notmatch "(^|\s)--hub-port(?:\s+|=)$HubPort(\s|$)") {
+        throw "Gateway port $Port listener PID $($listener.OwningProcess) is not running the auth hub on expected loopback port $HubPort."
+    }
+    if ($commandLine -match "(^|\s)--no-hub(\s|$)") {
+        throw "Gateway port $Port listener PID $($listener.OwningProcess) explicitly disabled the auth hub."
+    }
     if (Test-Path $GatewayPidFile) {
         $expectedPid = [int](Get-Content -Raw -LiteralPath $GatewayPidFile)
         if ($expectedPid -ne [int]$listener.OwningProcess) {
@@ -382,6 +390,25 @@ function Assert-GatewayReadyThroughCli {
         throw "Authenticated gateway readiness probe failed with exit code $LASTEXITCODE"
     }
     Write-Host ($output -join "`n")
+}
+
+function Assert-AuthHubReady {
+    $uri = "http://127.0.0.1:$HubPort/api/devices"
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $uri -TimeoutSec 5
+    } catch {
+        throw "Auth hub readiness probe failed at $uri`: $($_.Exception.Message)"
+    }
+    if ($response.StatusCode -ne 200) {
+        throw "Auth hub readiness probe returned HTTP $($response.StatusCode) at $uri."
+    }
+    $body = $response.Content | ConvertFrom-Json
+    if (-not $body.gatewayUrl -or $body.gatewayUrl -ne "https://$PublicHost`:$Port") {
+        throw "Auth hub readiness probe returned unexpected gatewayUrl '$($body.gatewayUrl)' instead of https://$PublicHost`:$Port."
+    }
+    if ($null -eq $body.devices -or $null -eq $body.pendingPairings) {
+        throw "Auth hub readiness probe did not return devices and pendingPairings arrays."
+    }
 }
 
 function Invoke-GatewayProbe([string]$Path, [string]$Cookie) {
@@ -472,7 +499,7 @@ if (Assert-GatewayListenerExpected) {
 } else {
     $gatewayProcess = Start-HiddenIdleProcess `
         -FilePath $node `
-        -ArgumentList @($GatewayCli, 'serve', '--host', $PublicHost, '--port', "$Port") `
+        -ArgumentList @($GatewayCli, 'serve', '--host', $PublicHost, '--port', "$Port", '--hub-port', "$HubPort") `
         -WorkingDirectory $ProjectRoot `
         -Name 'ST Mobile Gateway' `
         -OutLog (Join-Path $LogRoot 'gateway.out.log') `
@@ -494,6 +521,10 @@ Assert-SillyTavernPortSafe
 Assert-SillyTavernIdentity
 Assert-GatewaySecurityProbes
 Assert-GatewayReadyThroughCli
+Assert-AuthHubReady
 
 node $GatewayCli info --host $PublicHost --port $Port
+Set-Content -LiteralPath $HubUrlFile -Value "http://127.0.0.1:$HubPort/"
+Write-Host "Auth hub: http://127.0.0.1:$HubPort/"
 Write-Host "Generate a QR with: node `"$GatewayCli`" pair --host $PublicHost --port $Port --label `"S24 Ultra`""
+Write-Host "Open the auth hub with: Start-Process http://127.0.0.1:$HubPort/"

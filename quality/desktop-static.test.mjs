@@ -133,6 +133,42 @@ test('pairing QR output stays under protected state ACLs', async () => {
   );
 });
 
+test('desktop auth hub is loopback-only and launched with the gateway', async () => {
+  const start = await text('scripts/Start-StMobile.ps1');
+  const stop = await text('scripts/Stop-StMobile.ps1');
+  const cli = await text('gateway/src/cli.js');
+  const server = await text('gateway/src/server.js');
+  const hub = await text('gateway/src/hub.js');
+
+  assert.match(start, /\[int\]\$HubPort = 38444/);
+  assert.match(start, /\$HubUrlFile = Join-Path \$StateRoot 'auth-hub\.url'/);
+  assert.match(start, /--hub-port', "\$HubPort"/);
+  assert.match(start, /is not running the auth hub on expected loopback port \$HubPort/);
+  assert.match(start, /explicitly disabled the auth hub/);
+  assert.match(start, /function Assert-AuthHubReady/);
+  assert.match(start, /http:\/\/127\.0\.0\.1:\$HubPort\/api\/devices/);
+  assert.match(start, /Auth hub readiness probe returned unexpected gatewayUrl/);
+  assert.match(start, /Set-Content -LiteralPath \$HubUrlFile -Value "http:\/\/127\.0\.0\.1:\$HubPort\/"/);
+  assert.match(stop, /Remove-Item -LiteralPath \$HubUrlFile/);
+  assert.match(cli, /--hub-port 38444/);
+  assert.match(cli, /parsePort\(argValue\(args, '--hub-port', 38444\), '--hub-port'\)/);
+  assert.match(cli, /Auth hub: \$\{gateway\.hub\.url\}/);
+  assert.match(server, /hubPort/);
+  assert.match(server, /createAuthHubServer/);
+  assert.match(hub, /auth hub must bind to loopback only/);
+  assert.match(hub, /isAllowedHubHost/);
+  assert.match(hub, /isAllowedHubOrigin/);
+  assert.match(hub, /Forbidden hub origin/);
+  assert.match(hub, /HUB_MUTATION_HEADER = 'x-st-mobile-hub'/);
+  assert.match(hub, /QRCode\.toDataURL/);
+  assert.match(hub, /pendingPairings/);
+  assert.match(hub, /getConnectionSnapshot/);
+  assert.match(hub, /closeRevokedSockets/);
+  assert.match(hub, /Attribution/);
+  assert.match(hub, /docs\.sillytavern\.app\/licensecredits\//);
+  assert.doesNotMatch(hub, /innerHTML/);
+});
+
 test('desktop firewall port parser detects gateway port in lists and ranges', () => {
   const startScript = path.join(root, 'scripts', 'Start-StMobile.ps1').replaceAll("'", "''");
   const script = `

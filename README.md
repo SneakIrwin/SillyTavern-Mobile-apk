@@ -14,6 +14,7 @@ This project builds a debug Android APK that opens your desktop SillyTavern UI t
 - Malformed or invalid session cookies fail closed as `403` and do not rewrite `state/state.json`.
 - The CA private key is generated under a restricted ACL for Sneak, SYSTEM, and Administrators.
 - The Android WebView has no JavaScript bridge, does not bypass SSL errors, disables file URL access, and only allows navigation inside the paired gateway origin.
+- The PC auth hub binds to loopback only at `http://127.0.0.1:38444/`; it generates QR/deep links, lists authorized devices, and shows active connected/disconnected state from the running gateway.
 - The build script pins Gradle, Temurin JDK 21.0.11+10, Android command-line tools 15641748, Gradle-resolved dependencies, and installed Android SDK package files by SHA-256.
 - On launch, the APK checks the GitHub raw update manifest, downloads only from this repo's `update/` path, verifies SHA-256 plus package identity/version, and then uses Android's normal user-confirmed package installer prompt. It does not root the phone, become a device owner/admin, install silently, or use system updater privileges.
 
@@ -25,6 +26,7 @@ This project builds a debug Android APK that opens your desktop SillyTavern UI t
 - Gateway state: `state/state.json`
 - CA certificate: `state/certs/st-mobile-ca.crt`
 - Pairing QR folder: `state/pairing/` with private Windows ACLs
+- Auth hub URL file: `state/auth-hub.url`
 - Gateway logs: `logs/gateway.out.log` and `logs/gateway.err.log`
 
 ## Commands
@@ -33,6 +35,12 @@ Start the desktop gateway:
 
 ```powershell
 .\scripts\Start-StMobile.ps1 -Port 38443
+```
+
+Open the PC-side auth hub after startup:
+
+```powershell
+Start-Process http://127.0.0.1:38444/
 ```
 
 Generate a fresh pairing QR:
@@ -75,7 +83,7 @@ The GitHub repository must remain public for this no-credentials update channel.
 
 This project is licensed under the GNU Affero General Public License v3.0 to match SillyTavern. See `LICENSE`.
 
-SillyTavern-Launcher is MIT licensed; its notice is preserved in `LICENSES/SillyTavern-Launcher-MIT.txt`. See `NOTICE.md` for upstream attribution and source-location notes.
+SillyTavern-Launcher is MIT licensed; its notice is preserved in `LICENSES/SillyTavern-Launcher-MIT.txt`. See `NOTICE.md` and `ATTRIBUTION.md` for upstream attribution, source-location notes, and the honest breakdown of what this project uses.
 
 Run tests:
 

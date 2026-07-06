@@ -79,6 +79,24 @@ test('update downloads are hash checked and package identity checked before inst
   assert.ok(identityCheckIndex >= 0 && installPromptIndex > identityCheckIndex);
 });
 
+test('pairing state and session cookies survive normal same-package updates', async () => {
+  const manifest = await text('android/app/src/main/AndroidManifest.xml');
+  const build = await text('android/app/build.gradle');
+  const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
+  const updateManifest = await text('update/latest.json');
+
+  assert.match(build, /applicationId 'app\.sillytavern\.securemobile'/);
+  assert.match(updateManifest, /"packageName":\s+"app\.sillytavern\.securemobile"/);
+  assert.match(source, /private static final String PREFS = "st_mobile"/);
+  assert.match(source, /private static final String KEY_GATEWAY_ORIGIN = "gateway_origin"/);
+  assert.match(source, /getSharedPreferences\(PREFS, Context\.MODE_PRIVATE\)/);
+  assert.match(source, /saveGatewayOrigin\(pendingGatewayOrigin\)/);
+  assert.match(source, /CookieManager\.getInstance\(\)\.flush\(\)/);
+  assert.match(source, /PackageInstaller\.SessionParams\.MODE_FULL_INSTALL/);
+  assert.doesNotMatch(manifest, /android:allowBackup="true"/);
+  assert.doesNotMatch(source, /removeAllCookies|removeSessionCookies|clearCache\(true\)|clearFormData|deleteDatabase|clearApplicationUserData/);
+});
+
 test('pairing admission rejects public origins and waits to persist until success', async () => {
   const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
   assert.match(source, /EXPECTED_GATEWAY_PORT\s*=\s*38443/);

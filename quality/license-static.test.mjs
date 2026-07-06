@@ -25,6 +25,18 @@ test('notice names upstream licenses and source location', async () => {
   const notice = await text('NOTICE.md');
   assert.match(notice, /GNU Affero General Public License v3\.0/);
   assert.match(notice, /SillyTavern-Launcher is licensed under the MIT License/);
+  assert.match(notice, /TavernAI 1\.2\.8 by Humi/);
+  assert.match(notice, /red network\/brain launcher icon style/);
   assert.match(notice, /https:\/\/github\.com\/SneakIrwin\/SillyTavern-Mobile-apk/);
   assert.match(notice, /not an official SillyTavern or SillyTavern-Launcher release/);
+});
+
+test('attribution file shares upstream breakdown openly', async () => {
+  const attribution = await text('ATTRIBUTION.md');
+  assert.match(attribution, /https:\/\/github\.com\/SillyTavern\/SillyTavern/);
+  assert.match(attribution, /https:\/\/docs\.sillytavern\.app\/licensecredits\//);
+  assert.match(attribution, /Original TavernAI 1\.2\.8 by Humi/);
+  assert.match(attribution, /https:\/\/github\.com\/SillyTavern\/SillyTavern-Launcher/);
+  assert.match(attribution, /LICENSES\/SillyTavern-Launcher-MIT\.txt/);
+  assert.match(attribution, /not an official SillyTavern or SillyTavern Launcher release/);
 });

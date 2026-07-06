@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 $StateRoot = Join-Path $ProjectRoot 'state'
 $GatewayPidFile = Join-Path $StateRoot 'gateway.pid'
+$HubUrlFile = Join-Path $StateRoot 'auth-hub.url'
 $SillyTavernPidFile = Join-Path $StateRoot 'sillytavern.pid'
 
 function Stop-FromPidFile([string]$PidFile, [string]$Name) {
@@ -27,6 +28,7 @@ function Stop-FromPidFile([string]$PidFile, [string]$Name) {
 }
 
 Stop-FromPidFile $GatewayPidFile 'ST Mobile Gateway'
+Remove-Item -LiteralPath $HubUrlFile -Force -ErrorAction SilentlyContinue
 if ($StopSillyTavern) {
     Stop-FromPidFile $SillyTavernPidFile 'SillyTavern'
 }

@@ -17,6 +17,14 @@ function argValue(args, name, fallback = undefined) {
   return index >= 0 && args[index + 1] ? args[index + 1] : fallback;
 }
 
+function parsePort(value, name) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${name} must be an integer TCP port from 1 to 65535`);
+  }
+  return port;
+}
+
 function parseConfig(args) {
   return resolveConfig({
     publicHost: argValue(args, '--host'),
@@ -46,6 +54,7 @@ async function prepareStateOnly(config) {
 function printUsage() {
   console.log(`Usage:
   node gateway/src/cli.js serve [--host 192.168.1.x] [--port 38443]
+  node gateway/src/cli.js serve [--host 192.168.1.x] [--port 38443] [--hub-port 38444]
   node gateway/src/cli.js pair [--host 192.168.1.x] [--port 38443] [--label "S24 Ultra"]
   node gateway/src/cli.js ready [--port 38443]
   node gateway/src/cli.js list
@@ -57,17 +66,22 @@ function printUsage() {
 async function commandServe(args) {
   const config = parseConfig(args);
   const { store, certificates } = await prepare(config);
+  const hubPort = args.includes('--no-hub') ? undefined : parsePort(argValue(args, '--hub-port', 38444), '--hub-port');
   await assertTargetReady(config);
-  await createGatewayServer({
+  const gateway = await createGatewayServer({
     target: config.target,
     store,
     certificates,
     listenHost: config.listenHost,
     listenPort: config.port,
     publicHost: config.publicHost,
+    hubPort,
   });
 
   console.log(`ST Mobile Gateway listening at https://${config.publicHost}:${config.port}`);
+  if (gateway.hub?.url) {
+    console.log(`Auth hub: ${gateway.hub.url}`);
+  }
   console.log(`Proxy target: ${config.target}`);
   console.log(`State: ${config.stateDir}`);
 }

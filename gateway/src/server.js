@@ -5,6 +5,7 @@ import { URL } from 'node:url';
 
 import { COOKIE_NAME, consumePairingNonce, parseCookies, validateRequestSession } from './auth.js';
 import { ensureCertificates } from './certs.js';
+import { createAuthHubServer } from './hub.js';
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -178,6 +179,14 @@ export async function createGatewayServer(options) {
     });
   }
 
+  function getConnectionSnapshot() {
+    const snapshot = new Map();
+    for (const [tokenHash, sockets] of activeSockets) {
+      snapshot.set(tokenHash, { connectionCount: sockets.size });
+    }
+    return snapshot;
+  }
+
   async function closeRevokedSockets() {
     const state = await store.load();
     for (const [tokenHash, sockets] of activeSockets) {
@@ -282,11 +291,35 @@ export async function createGatewayServer(options) {
     });
   });
 
+  const boundAddress = server.address();
+  const gatewayPort = typeof boundAddress === 'object' && boundAddress ? boundAddress.port : (options.listenPort ?? 38443);
+  let hub = null;
+  try {
+    hub = options.hubPort === undefined ? null : await createAuthHubServer({
+      store,
+      publicHost: options.publicHost,
+      gatewayPort,
+      gatewayScheme: options.tls === false ? 'http' : 'https',
+      listenHost: options.hubHost ?? '127.0.0.1',
+      listenPort: options.hubPort,
+      getConnectionSnapshot,
+      closeRevokedSockets,
+    });
+  } catch (error) {
+    clearInterval(revokeTimer);
+    await new Promise((resolve) => server.close(resolve));
+    throw error;
+  }
+
   return {
     server,
-    close: () => new Promise((resolve) => {
+    hub,
+    close: async () => {
       clearInterval(revokeTimer);
-      server.close(resolve);
-    }),
+      if (hub) {
+        await hub.close();
+      }
+      await new Promise((resolve) => server.close(resolve));
+    },
   };
 }
