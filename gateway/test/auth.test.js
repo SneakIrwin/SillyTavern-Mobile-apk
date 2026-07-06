@@ -132,7 +132,7 @@ test('durable state stores hashed session tokens only', async () => {
     assert.equal(rawState.includes(session.token), false);
     assert.equal(rawState.includes(session.tokenHash), true);
 
-    const valid = await validateSessionToken(store, session.token);
+    const valid = await validateSessionToken(store, session.token, { touch: 'blocking' });
     assert.equal(valid.deviceId, session.deviceId);
   });
 });
@@ -164,7 +164,7 @@ test('concurrent validation cannot erase a revocation', async () => {
     const session = await consumePairingNonce(store, issued.nonce, { userAgent: 'Android WebView' });
 
     await Promise.all([
-      ...Array.from({ length: 32 }, () => validateSessionToken(store, session.token)),
+      ...Array.from({ length: 32 }, () => validateSessionToken(store, session.token, { touch: 'blocking' })),
       revokeDevice(store, session.deviceId),
     ]);
 

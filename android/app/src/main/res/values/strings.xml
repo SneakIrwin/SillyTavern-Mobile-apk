@@ -6,6 +6,7 @@
     <string name="forget_button">Forget</string>
     <string name="not_paired">Not paired</string>
     <string name="invalid_pairing_link">Invalid pairing link</string>
+    <string name="gateway_load_failed">SillyTavern did not load through the secure gateway. Check the desktop gateway and Wi-Fi, then reopen the app.</string>
     <string name="update_ready">SillyTavern Mobile %1$s is ready to install</string>
     <string name="update_install_permission_needed">Allow SillyTavern Mobile to install updates, then reopen the app</string>
     <string name="update_install_failed">Update install could not start</string>

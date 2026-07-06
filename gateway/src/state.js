@@ -41,6 +41,21 @@ export function createStateStore({ stateDir, lockTimeoutMs = LOCK_TIMEOUT_MS, lo
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  async function renameWithRetry(source, destination) {
+    const transientCodes = new Set(['EPERM', 'EACCES', 'EBUSY']);
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      try {
+        await rename(source, destination);
+        return;
+      } catch (error) {
+        if (!transientCodes.has(error.code) || attempt === 11) {
+          throw error;
+        }
+        await sleep(Math.min(500, 20 * (attempt + 1)));
+      }
+    }
+  }
+
   function processIsAlive(pid) {
     if (!Number.isInteger(pid) || pid <= 0) {
       return false;
@@ -100,7 +115,7 @@ export function createStateStore({ stateDir, lockTimeoutMs = LOCK_TIMEOUT_MS, lo
     next.updatedAt = new Date().toISOString();
     const tmpFile = `${stateFile}.${process.pid}.${Date.now()}.${crypto.randomUUID()}.tmp`;
     await writeFile(tmpFile, `${JSON.stringify(next, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await rename(tmpFile, stateFile);
+    await renameWithRetry(tmpFile, stateFile);
     await removeStaleTempFiles();
     return next;
   }

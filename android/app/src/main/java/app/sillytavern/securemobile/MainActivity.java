@@ -9,6 +9,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
 import android.net.http.SslError;
@@ -68,6 +69,7 @@ public class MainActivity extends Activity {
     private LinearLayout root;
     private LinearLayout pairingPanel;
     private WebView webView;
+    private TextView webStatus;
     private EditText pairingInput;
     private ValueCallback<Uri[]> fileCallback;
     private String pendingGatewayOrigin;
@@ -139,6 +141,14 @@ public class MainActivity extends Activity {
         pairingPanel.addView(pairingInput);
         pairingPanel.addView(pairButton);
 
+        webStatus = new TextView(this);
+        webStatus.setTextColor(Color.WHITE);
+        webStatus.setTextSize(14);
+        webStatus.setGravity(Gravity.CENTER);
+        webStatus.setPadding(padding, dp(10), padding, dp(10));
+        webStatus.setBackgroundColor(Color.rgb(74, 24, 28));
+        webStatus.setVisibility(View.GONE);
+
         webView = new WebView(this);
         webView.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -156,6 +166,9 @@ public class MainActivity extends Activity {
         });
 
         root.addView(pairingPanel);
+        root.addView(webStatus, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(webView);
         root.addView(forgetButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -197,9 +210,19 @@ public class MainActivity extends Activity {
 
             @Override
             public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
-                clearPendingPairing();
                 handler.cancel();
-                showPairingPanel();
+                if (pendingGatewayOrigin != null) {
+                    clearPendingPairing();
+                    showPairingPanel();
+                    showInvalidPairingLink();
+                    return;
+                }
+                showGatewayLoadFailed();
+            }
+
+            @Override
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                hideWebStatus();
             }
 
             @Override
@@ -214,6 +237,8 @@ public class MainActivity extends Activity {
                     clearPendingPairing();
                     showPairingPanel();
                     showInvalidPairingLink();
+                } else if (request.isForMainFrame() && isSavedGatewayOrigin(request.getUrl())) {
+                    showGatewayLoadFailed();
                 }
             }
 
@@ -224,6 +249,8 @@ public class MainActivity extends Activity {
                     clearPendingPairing();
                     showPairingPanel();
                     showInvalidPairingLink();
+                } else if (request.isForMainFrame() && isSavedGatewayOrigin(request.getUrl())) {
+                    showGatewayLoadFailed();
                 }
             }
         });
@@ -313,6 +340,13 @@ public class MainActivity extends Activity {
                 && pendingGatewayOrigin.equals(originFor(uri));
     }
 
+    private boolean isSavedGatewayOrigin(Uri uri) {
+        String savedOrigin = getGatewayOrigin();
+        return savedOrigin != null
+                && uri != null
+                && savedOrigin.equals(originFor(uri));
+    }
+
     private void commitPendingPairingIfReady(Uri uri) {
         if (pendingGatewayOrigin == null || uri == null || !pendingGatewayOrigin.equals(originFor(uri))) {
             return;
@@ -380,6 +414,7 @@ public class MainActivity extends Activity {
     }
 
     private void showPairingPanel() {
+        hideWebStatus();
         pairingPanel.setVisibility(View.VISIBLE);
         webView.setVisibility(View.GONE);
     }
@@ -387,6 +422,16 @@ public class MainActivity extends Activity {
     private void showWebView() {
         pairingPanel.setVisibility(View.GONE);
         webView.setVisibility(View.VISIBLE);
+    }
+
+    private void hideWebStatus() {
+        webStatus.setVisibility(View.GONE);
+    }
+
+    private void showGatewayLoadFailed() {
+        webStatus.setText(getString(R.string.gateway_load_failed));
+        webStatus.setVisibility(View.VISIBLE);
+        showWebView();
     }
 
     private void openExternal(Uri uri) {

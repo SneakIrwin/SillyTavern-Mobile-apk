@@ -152,11 +152,20 @@ export async function createGatewayServer(options) {
   }
 
   const activeSockets = new Map();
+  const trackedSockets = new WeakSet();
+
+  function logLastSeenTouchError(error) {
+    console.warn(`[st-mobile-gateway] lastSeenAt update skipped: ${error.message}`);
+  }
 
   function trackSocket(device, socket) {
     if (!device?.tokenHash || !socket) {
       return;
     }
+    if (trackedSockets.has(socket)) {
+      return;
+    }
+    trackedSockets.add(socket);
     if (!activeSockets.has(device.tokenHash)) {
       activeSockets.set(device.tokenHash, new Set());
     }
@@ -217,7 +226,7 @@ export async function createGatewayServer(options) {
         return;
       }
 
-      const device = await validateRequestSession(store, req);
+      const device = await validateRequestSession(store, req, COOKIE_NAME, { onTouchError: logLastSeenTouchError });
       if (!device) {
         sendForbidden(res);
         return;
@@ -226,6 +235,7 @@ export async function createGatewayServer(options) {
       trackSocket(device, req.socket);
       proxyHttp(targetUrl, req, res);
     } catch (error) {
+      console.error(`[st-mobile-gateway] ${req.method} ${req.url} failed: ${error.stack || error.message}`);
       if (!res.headersSent) {
         res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
       }
@@ -252,7 +262,7 @@ export async function createGatewayServer(options) {
   server.on('upgrade', async (req, socket, head) => {
     try {
       const cookies = parseCookies(req.headers.cookie);
-      const device = await validateRequestSession(store, { headers: { cookie: `${COOKIE_NAME}=${cookies[COOKIE_NAME] ?? ''}` } });
+      const device = await validateRequestSession(store, { headers: { cookie: `${COOKIE_NAME}=${cookies[COOKIE_NAME] ?? ''}` } }, COOKIE_NAME, { onTouchError: logLastSeenTouchError });
       if (!device) {
         sendForbidden(socket);
         return;

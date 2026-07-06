@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createPairingNonce, consumePairingNonce } from '../src/auth.js';
+import { createPairingNonce, consumePairingNonce, sha256 } from '../src/auth.js';
 import { createGatewayServer } from '../src/server.js';
 import { createStateStore } from '../src/state.js';
 
@@ -68,6 +68,22 @@ async function startGateway(target) {
       await gateway.close();
       await rm(dir, { recursive: true, force: true });
     },
+  };
+}
+
+async function startGatewayWithStore(target, store) {
+  const gateway = await createGatewayServer({
+    target,
+    store,
+    tls: false,
+    listenHost: '127.0.0.1',
+    listenPort: 0,
+  });
+  const address = gateway.server.address();
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    store,
+    close: gateway.close,
   };
 }
 
@@ -147,6 +163,52 @@ test('authenticated HTTP requests proxy to SillyTavern', async () => {
     assert.equal(response.status, 200);
     assert.equal(await response.text(), 'st ok /characters');
     assert.deepEqual(st.hits(), { httpHits: 1, upgradeHits: 0 });
+  } finally {
+    await gateway.close();
+    await st.close();
+  }
+});
+
+test('authenticated proxying does not fail if lastSeenAt touch cannot be persisted', async () => {
+  const st = await startFakeSillyTavern();
+  const token = 'fixed-test-token';
+  let touchAttempts = 0;
+  const store = {
+    load: async () => ({
+      version: 1,
+      createdAt: '2026-07-03T20:00:00.000Z',
+      updatedAt: '2026-07-03T20:00:00.000Z',
+      pendingNonces: {},
+      certs: {},
+      devices: {
+        deviceA: {
+          deviceId: 'deviceA',
+          tokenHash: sha256(token),
+          label: 'touch failure',
+          userAgent: '',
+          remoteAddress: '',
+          createdAt: '2026-07-03T20:00:00.000Z',
+          lastSeenAt: '2026-07-03T20:00:00.000Z',
+          revokedAt: null,
+        },
+      },
+    }),
+    update: async () => {
+      touchAttempts += 1;
+      const error = new Error('operation not permitted');
+      error.code = 'EPERM';
+      throw error;
+    },
+  };
+  const gateway = await startGatewayWithStore(st.target, store);
+  try {
+    const response = await fetch(`${gateway.url}/script.js`, {
+      headers: { cookie: `stmg=${token}` },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), 'st ok /script.js');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(touchAttempts, 1);
   } finally {
     await gateway.close();
     await st.close();

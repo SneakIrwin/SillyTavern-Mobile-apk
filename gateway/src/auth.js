@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 
 export const COOKIE_NAME = 'stmg';
+const DEFAULT_LAST_SEEN_TOUCH_INTERVAL_MS = 30_000;
+const lastSeenTouchReservations = new Map();
 
 function toDate(value) {
   return value instanceof Date ? value : new Date(value ?? Date.now());
@@ -16,6 +18,20 @@ function randomBase64Url(bytes = 32) {
 
 export function sha256(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+function shouldTouchLastSeen(device, now, minIntervalMs) {
+  const previous = Date.parse(device?.lastSeenAt ?? '');
+  return !Number.isFinite(previous) || now.getTime() - previous >= minIntervalMs;
+}
+
+function reserveLastSeenTouch(tokenHash, now, minIntervalMs) {
+  const previous = lastSeenTouchReservations.get(tokenHash) ?? 0;
+  if (now.getTime() - previous < minIntervalMs) {
+    return false;
+  }
+  lastSeenTouchReservations.set(tokenHash, now.getTime());
+  return true;
 }
 
 export function parseCookies(header) {
@@ -114,24 +130,37 @@ export async function validateSessionToken(store, token, options = {}) {
 
   const tokenHash = sha256(token);
   const now = toDate(options.now);
-  let validDevice = null;
+  const minTouchIntervalMs = Number(options.minTouchIntervalMs ?? DEFAULT_LAST_SEEN_TOUCH_INTERVAL_MS);
 
   const currentState = await store.load();
-  if (!Object.values(currentState.devices).some((device) => device.tokenHash === tokenHash && !device.revokedAt)) {
+  const validDevice = Object.values(currentState.devices).find((device) => device.tokenHash === tokenHash && !device.revokedAt);
+  if (!validDevice) {
     return null;
   }
 
-  await store.update((state) => {
-    for (const device of Object.values(state.devices)) {
-      if (device.tokenHash === tokenHash && !device.revokedAt) {
-        device.lastSeenAt = iso(now);
-        validDevice = { ...device };
-        return;
+  if (
+    options.touch !== false
+    && shouldTouchLastSeen(validDevice, now, minTouchIntervalMs)
+    && reserveLastSeenTouch(tokenHash, now, minTouchIntervalMs)
+  ) {
+    const touch = store.update((state) => {
+      for (const device of Object.values(state.devices)) {
+        if (device.tokenHash === tokenHash && !device.revokedAt && shouldTouchLastSeen(device, now, minTouchIntervalMs)) {
+          device.lastSeenAt = iso(now);
+          return;
+        }
       }
+    }).catch((error) => {
+      if (typeof options.onTouchError === 'function') {
+        options.onTouchError(error);
+      }
+    });
+    if (options.touch === 'blocking') {
+      await touch;
     }
-  });
+  }
 
-  return validDevice;
+  return { ...validDevice };
 }
 
 export async function revokeDevice(store, deviceId, options = {}) {
@@ -148,7 +177,11 @@ export async function revokeDevice(store, deviceId, options = {}) {
   return revoked;
 }
 
-export async function validateRequestSession(store, request, cookieName = COOKIE_NAME) {
+export async function validateRequestSession(store, request, cookieName = COOKIE_NAME, options = {}) {
+  if (cookieName && typeof cookieName === 'object') {
+    options = cookieName;
+    cookieName = COOKIE_NAME;
+  }
   const token = parseCookies(request.headers.cookie)[cookieName];
-  return validateSessionToken(store, token);
+  return validateSessionToken(store, token, options);
 }
