@@ -22,6 +22,7 @@ import android.view.ViewGroup;
 import android.webkit.SslErrorHandler;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.CookieManager;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -360,6 +361,7 @@ public class MainActivity extends Activity {
             return;
         }
         saveGatewayOrigin(pendingGatewayOrigin);
+        CookieManager.getInstance().flush();
         clearPendingPairing();
     }
 

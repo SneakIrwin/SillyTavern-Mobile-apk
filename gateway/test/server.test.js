@@ -254,6 +254,7 @@ test('one-time pairing URL sets secure cookie and refuses reuse', async () => {
     assert.equal(first.status, 302);
     assert.match(first.headers.get('set-cookie'), /stmg=.*HttpOnly.*SameSite=Lax/i);
     assert.match(first.headers.get('set-cookie'), /Secure/i);
+    assert.match(first.headers.get('set-cookie'), /Max-Age=31536000/i);
 
     const second = await fetch(`${gateway.url}/__mobile/pair/${issued.nonce}`, { redirect: 'manual' });
     assert.equal(second.status, 403);

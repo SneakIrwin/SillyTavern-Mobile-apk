@@ -97,6 +97,9 @@ test('pairing admission rejects public origins and waits to persist until succes
 
   const commitPendingPairingIfReady = source.match(/private void commitPendingPairingIfReady\(Uri uri\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
   assert.match(commitPendingPairingIfReady, /pendingMainFrameError/);
+  assert.match(commitPendingPairingIfReady, /saveGatewayOrigin\(pendingGatewayOrigin\)/);
+  assert.match(commitPendingPairingIfReady, /CookieManager\.getInstance\(\)\.flush\(\)/);
+  assert.ok(commitPendingPairingIfReady.indexOf('saveGatewayOrigin(pendingGatewayOrigin)') < commitPendingPairingIfReady.indexOf('CookieManager.getInstance().flush()'));
   assert.match(commitPendingPairingIfReady, /return/);
 });
 
