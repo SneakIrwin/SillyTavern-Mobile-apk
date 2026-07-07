@@ -2,6 +2,7 @@
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
+            <certificates src="system" />
             <certificates src="@raw/st_mobile_ca" />
         </trust-anchors>
     </base-config>

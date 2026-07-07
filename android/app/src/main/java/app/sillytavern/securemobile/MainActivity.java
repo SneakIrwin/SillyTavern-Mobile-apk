@@ -11,6 +11,7 @@ import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
@@ -19,6 +20,7 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.webkit.SslErrorHandler;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -72,6 +74,7 @@ public class MainActivity extends Activity {
     private WebView webView;
     private TextView webStatus;
     private EditText pairingInput;
+    private Button forgetButton;
     private ValueCallback<Uri[]> fileCallback;
     private String pendingGatewayOrigin;
     private String pendingPairingPath;
@@ -82,16 +85,21 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         preferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         WebView.setWebContentsDebuggingEnabled(false);
         buildLayout();
         configureWebView();
-        handleIntent(getIntent());
+        boolean startedPairing = handleIntent(getIntent());
         checkForUpdateOnLaunch();
-        if (getGatewayOrigin() == null) {
+        String gatewayOrigin = getGatewayOrigin();
+        if (startedPairing) {
+            return;
+        }
+        if (gatewayOrigin == null) {
             showPairingPanel();
         } else if (webView.getUrl() == null) {
             showWebView();
-            webView.loadUrl(getGatewayOrigin() + "/");
+            webView.loadUrl(gatewayOrigin + "/");
         }
     }
 
@@ -156,8 +164,9 @@ public class MainActivity extends Activity {
                 0,
                 1f));
 
-        Button forgetButton = new Button(this);
+        forgetButton = new Button(this);
         forgetButton.setText(getString(R.string.forget_button));
+        forgetButton.setVisibility(View.GONE);
         forgetButton.setOnClickListener((view) -> {
             preferences.edit().remove(KEY_GATEWAY_ORIGIN).apply();
             clearPendingPairing();
@@ -175,6 +184,17 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(root);
+        root.getViewTreeObserver().addOnGlobalLayoutListener(this::applyKeyboardInset);
+    }
+
+    private void applyKeyboardInset() {
+        Rect visibleFrame = new Rect();
+        root.getWindowVisibleDisplayFrame(visibleFrame);
+        int obscuredHeight = Math.max(0, root.getRootView().getHeight() - visibleFrame.bottom);
+        int keyboardInset = obscuredHeight > dp(120) ? obscuredHeight : 0;
+        if (root.getPaddingBottom() != keyboardInset) {
+            root.setPadding(0, 0, 0, keyboardInset);
+        }
     }
 
     private void configureWebView() {
@@ -212,13 +232,14 @@ public class MainActivity extends Activity {
             @Override
             public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
                 handler.cancel();
-                if (pendingGatewayOrigin != null) {
+                Uri errorUri = uriFromSslError(error);
+                if (isPendingGatewayOrigin(errorUri)) {
                     clearPendingPairing();
                     showPairingPanel();
                     showInvalidPairingLink();
-                    return;
+                } else if (isSavedGatewayOrigin(errorUri)) {
+                    showGatewayLoadFailed();
                 }
-                showGatewayLoadFailed();
             }
 
             @Override
@@ -278,27 +299,32 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void handleIntent(Intent intent) {
+    private boolean handleIntent(Intent intent) {
         handleUpdateInstallCallback(intent);
         Uri data = intent == null ? null : intent.getData();
         if (data == null) {
-            return;
+            return false;
         }
         if ("stmobile".equals(data.getScheme()) && "pair".equals(data.getHost())) {
-            openPairingUrl(data.getQueryParameter("url"));
+            boolean opened = openPairingUrl(data.getQueryParameter("url"));
+            if (!opened && getGatewayOrigin() == null) {
+                showPairingPanel();
+            }
+            return opened;
         }
+        return false;
     }
 
-    private void openPairingUrl(String url) {
+    private boolean openPairingUrl(String url) {
         if (url == null || url.isEmpty()) {
             showInvalidPairingLink();
-            return;
+            return false;
         }
 
         Uri uri = Uri.parse(url);
         if (!isValidPairingUri(uri)) {
             showInvalidPairingLink();
-            return;
+            return false;
         }
 
         pendingGatewayOrigin = originFor(uri);
@@ -306,6 +332,7 @@ public class MainActivity extends Activity {
         pendingMainFrameError = false;
         showWebView();
         webView.loadUrl(uri.toString());
+        return true;
     }
 
     private boolean isValidPairingUri(Uri uri) {
@@ -407,6 +434,13 @@ public class MainActivity extends Activity {
         return origin.toString();
     }
 
+    private Uri uriFromSslError(SslError error) {
+        if (error == null || error.getUrl() == null) {
+            return null;
+        }
+        return Uri.parse(error.getUrl());
+    }
+
     private String getGatewayOrigin() {
         return preferences.getString(KEY_GATEWAY_ORIGIN, null);
     }
@@ -419,11 +453,13 @@ public class MainActivity extends Activity {
         hideWebStatus();
         pairingPanel.setVisibility(View.VISIBLE);
         webView.setVisibility(View.GONE);
+        forgetButton.setVisibility(View.GONE);
     }
 
     private void showWebView() {
         pairingPanel.setVisibility(View.GONE);
         webView.setVisibility(View.VISIBLE);
+        forgetButton.setVisibility(View.GONE);
     }
 
     private void hideWebStatus() {
@@ -434,6 +470,7 @@ public class MainActivity extends Activity {
         webStatus.setText(getString(R.string.gateway_load_failed));
         webStatus.setVisibility(View.VISIBLE);
         showWebView();
+        forgetButton.setVisibility(View.VISIBLE);
     }
 
     private void openExternal(Uri uri) {

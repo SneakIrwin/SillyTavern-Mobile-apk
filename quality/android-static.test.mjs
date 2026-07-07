@@ -18,12 +18,14 @@ test('manifest has only expected permissions and declares local CA config', asyn
   assert.doesNotMatch(manifest, /DeviceAdminReceiver|android\.app\.device_admin|accessibilityservice|VpnService|SYSTEM_ALERT_WINDOW/);
   assert.match(manifest, /android:networkSecurityConfig="@xml\/network_security_config"/);
   assert.match(manifest, /android:scheme="stmobile"/);
+  assert.match(manifest, /android:windowSoftInputMode="adjustResize"/);
 });
 
-test('network security config fails closed, trusts gateway CA, and scopes GitHub system trust', async () => {
+test('network security config fails closed and trusts gateway plus normal HTTPS CAs', async () => {
   const config = await text('android/app/src/main/res/xml/network_security_config.xml');
   assert.match(config, /cleartextTrafficPermitted="false"/);
   assert.match(config, /@raw\/st_mobile_ca/);
+  assert.match(config, /<base-config cleartextTrafficPermitted="false">[\s\S]*<certificates src="system" \/>[\s\S]*<certificates src="@raw\/st_mobile_ca" \/>[\s\S]*<\/base-config>/);
   assert.match(config, /<domain includeSubdomains="false">raw\.githubusercontent\.com<\/domain>/);
   assert.match(config, /<certificates src="system" \/>/);
   assert.doesNotMatch(config, /includeSubdomains="true"/);
@@ -44,6 +46,26 @@ test('WebView wrapper has origin lock and no unsafe bridge or SSL bypass', async
   assert.match(source, /isAllowedGatewayUri/);
   assert.match(source, /ACTION_OPEN_DOCUMENT/);
   assert.match(source, /setWebContentsDebuggingEnabled\(false\)/);
+  assert.match(source, /SOFT_INPUT_ADJUST_RESIZE/);
+  assert.match(source, /addOnGlobalLayoutListener\(this::applyKeyboardInset\)/);
+  assert.match(source, /getWindowVisibleDisplayFrame/);
+  assert.match(source, /uriFromSslError/);
+  assert.match(source, /isPendingGatewayOrigin\(errorUri\)/);
+  assert.doesNotMatch(source, /pendingGatewayOrigin != null\) \{\s*clearPendingPairing/);
+});
+
+test('native wrapper does not consume live SillyTavern viewport space', async () => {
+  const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
+  assert.match(source, /private Button forgetButton/);
+  assert.match(source, /forgetButton\.setVisibility\(View\.GONE\)/);
+
+  const showWebView = source.match(/private void showWebView\(\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  assert.match(showWebView, /webView\.setVisibility\(View\.VISIBLE\)/);
+  assert.match(showWebView, /forgetButton\.setVisibility\(View\.GONE\)/);
+
+  const showGatewayLoadFailed = source.match(/private void showGatewayLoadFailed\(\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  assert.match(showGatewayLoadFailed, /showWebView\(\)/);
+  assert.match(showGatewayLoadFailed, /forgetButton\.setVisibility\(View\.VISIBLE\)/);
 });
 
 test('launch updater is normal user-approved PackageInstaller flow only', async () => {
@@ -105,9 +127,11 @@ test('pairing admission rejects public origins and waits to persist until succes
   assert.match(source, /pendingMainFrameError/);
   assert.match(source, /commitPendingPairingIfReady/);
 
-  const openPairingUrl = source.match(/private void openPairingUrl\(String url\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  const openPairingUrl = source.match(/private boolean openPairingUrl\(String url\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
   assert.doesNotMatch(openPairingUrl, /saveGatewayOrigin/);
   assert.match(openPairingUrl, /pendingGatewayOrigin\s*=/);
+  assert.match(openPairingUrl, /webView\.loadUrl\(uri\.toString\(\)\)/);
+  assert.match(openPairingUrl, /return true/);
 
   const isValidPairingUri = source.match(/private boolean isValidPairingUri\(Uri uri\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
   assert.match(isValidPairingUri, /uri\.getPort\(\) == EXPECTED_GATEWAY_PORT/);
@@ -119,6 +143,41 @@ test('pairing admission rejects public origins and waits to persist until succes
   assert.match(commitPendingPairingIfReady, /CookieManager\.getInstance\(\)\.flush\(\)/);
   assert.ok(commitPendingPairingIfReady.indexOf('saveGatewayOrigin(pendingGatewayOrigin)') < commitPendingPairingIfReady.indexOf('CookieManager.getInstance().flush()'));
   assert.match(commitPendingPairingIfReady, /return/);
+});
+
+test('startup pairing intent remains visible while asynchronous WebView pairing finishes', async () => {
+  const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
+  const onCreate = source.match(/protected void onCreate\(Bundle savedInstanceState\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  assert.match(onCreate, /boolean startedPairing = handleIntent\(getIntent\(\)\)/);
+  assert.match(onCreate, /String gatewayOrigin = getGatewayOrigin\(\)/);
+  assert.match(onCreate, /if \(startedPairing\) \{[\s\S]*return;[\s\S]*\}/);
+  assert.match(onCreate, /if \(gatewayOrigin == null\) \{[\s\S]*showPairingPanel\(\);[\s\S]*\} else if \(webView\.getUrl\(\) == null\) \{/);
+  assert.match(onCreate, /webView\.loadUrl\(gatewayOrigin \+ "\/"\)/);
+  assert.doesNotMatch(onCreate, /webView\.loadUrl\(getGatewayOrigin\(\) \+ "\/"\)/);
+  assert.doesNotMatch(onCreate, /getGatewayOrigin\(\) == null && !startedPairing/);
+  assert.doesNotMatch(onCreate, /handleIntent\(getIntent\(\)\);\s*checkForUpdateOnLaunch\(\);\s*if \(getGatewayOrigin\(\) == null\)/);
+
+  const handleIntent = source.match(/private boolean handleIntent\(Intent intent\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  assert.match(handleIntent, /return false/);
+  assert.match(handleIntent, /boolean opened = openPairingUrl\(data\.getQueryParameter\("url"\)\)/);
+  assert.match(handleIntent, /return opened/);
+  assert.doesNotMatch(handleIntent, /openPairingUrl\(data\.getQueryParameter\("url"\)\);\s*return true/);
+});
+
+test('invalid pairing deep links do not suppress the native pairing panel or load null gateway', async () => {
+  const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
+  const handleIntent = source.match(/private boolean handleIntent\(Intent intent\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  assert.match(handleIntent, /if \(!opened && getGatewayOrigin\(\) == null\) \{[\s\S]*showPairingPanel\(\);[\s\S]*\}/);
+  assert.match(handleIntent, /return opened/);
+
+  const openPairingUrl = source.match(/private boolean openPairingUrl\(String url\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  const emptyUrlReturn = openPairingUrl.indexOf('if (url == null || url.isEmpty())');
+  const validUriCheck = openPairingUrl.indexOf('if (!isValidPairingUri(uri))');
+  const loadUrl = openPairingUrl.indexOf('webView.loadUrl(uri.toString())');
+  assert.ok(emptyUrlReturn >= 0 && emptyUrlReturn < loadUrl);
+  assert.ok(validUriCheck >= 0 && validUriCheck < loadUrl);
+  assert.match(openPairingUrl, /showInvalidPairingLink\(\);\s*return false;/);
+  assert.doesNotMatch(openPairingUrl, /webView\.loadUrl\(getGatewayOrigin\(\) \+ "\/"\)/);
 });
 
 test('failed redirected pairing loads clear pending state instead of persisting origin', async () => {
