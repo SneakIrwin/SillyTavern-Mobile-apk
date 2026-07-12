@@ -11,7 +11,7 @@ import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
-import android.graphics.Rect;
+import android.graphics.Insets;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
@@ -20,6 +20,7 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.webkit.SslErrorHandler;
 import android.webkit.ValueCallback;
@@ -52,6 +53,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
+import java.util.UUID;
 
 @SuppressWarnings("deprecation")
 public class MainActivity extends Activity {
@@ -63,6 +65,9 @@ public class MainActivity extends Activity {
     private static final String UPDATE_RAW_PATH_PREFIX = "/SneakIrwin/SillyTavern-Mobile-apk/main/update/";
     private static final String UPDATE_MANIFEST_URL = "https://" + UPDATE_HOST + UPDATE_RAW_PATH_PREFIX + "latest.json";
     private static final String UPDATE_COMMIT_ACTION = "app.sillytavern.securemobile.UPDATE_COMMIT";
+    private static final String UPDATE_CALLBACK_TOKEN_EXTRA = "app.sillytavern.securemobile.UPDATE_CALLBACK_TOKEN";
+    private static final String KEY_UPDATE_SESSION_ID = "update_session_id";
+    private static final String KEY_UPDATE_CALLBACK_TOKEN = "update_callback_token";
     private static final int UPDATE_CONNECT_TIMEOUT_MS = 10000;
     private static final int UPDATE_READ_TIMEOUT_MS = 30000;
     private static final int UPDATE_MANIFEST_MAX_BYTES = 65536;
@@ -184,16 +189,26 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(root);
-        root.getViewTreeObserver().addOnGlobalLayoutListener(this::applyKeyboardInset);
+        configureWindowInsets();
     }
 
-    private void applyKeyboardInset() {
-        Rect visibleFrame = new Rect();
-        root.getWindowVisibleDisplayFrame(visibleFrame);
-        int obscuredHeight = Math.max(0, root.getRootView().getHeight() - visibleFrame.bottom);
-        int keyboardInset = obscuredHeight > dp(120) ? obscuredHeight : 0;
-        if (root.getPaddingBottom() != keyboardInset) {
-            root.setPadding(0, 0, 0, keyboardInset);
+    private void configureWindowInsets() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+            root.setOnApplyWindowInsetsListener((view, windowInsets) -> {
+                Insets systemBars = windowInsets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                Insets ime = windowInsets.getInsets(WindowInsets.Type.ime());
+                int bottomInset = Math.max(systemBars.bottom, ime.bottom);
+                if (root.getPaddingLeft() != systemBars.left
+                        || root.getPaddingTop() != systemBars.top
+                        || root.getPaddingRight() != systemBars.right
+                        || root.getPaddingBottom() != bottomInset) {
+                    root.setPadding(systemBars.left, systemBars.top, systemBars.right, bottomInset);
+                }
+                return windowInsets;
+            });
+            root.requestApplyInsets();
         }
     }
 
@@ -705,6 +720,11 @@ public class MainActivity extends Activity {
         }
 
         int sessionId = installer.createSession(params);
+        String callbackToken = UUID.randomUUID().toString();
+        preferences.edit()
+                .putInt(KEY_UPDATE_SESSION_ID, sessionId)
+                .putString(KEY_UPDATE_CALLBACK_TOKEN, callbackToken)
+                .apply();
         PackageInstaller.Session session = null;
         boolean committed = false;
         try {
@@ -717,6 +737,7 @@ public class MainActivity extends Activity {
 
             Intent callback = new Intent(this, MainActivity.class);
             callback.setAction(UPDATE_COMMIT_ACTION);
+            callback.putExtra(UPDATE_CALLBACK_TOKEN_EXTRA, callbackToken);
             int flags = PendingIntent.FLAG_UPDATE_CURRENT;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 flags |= PendingIntent.FLAG_MUTABLE;
@@ -730,6 +751,7 @@ public class MainActivity extends Activity {
             }
             if (!committed) {
                 installer.abandonSession(sessionId);
+                clearExpectedUpdateCallback();
             }
         }
     }
@@ -738,19 +760,49 @@ public class MainActivity extends Activity {
         if (intent == null || !UPDATE_COMMIT_ACTION.equals(intent.getAction())) {
             return;
         }
+        int sessionId = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1);
+        int expectedSessionId = preferences.getInt(KEY_UPDATE_SESSION_ID, -1);
+        String callbackToken = intent.getStringExtra(UPDATE_CALLBACK_TOKEN_EXTRA);
+        String expectedCallbackToken = preferences.getString(KEY_UPDATE_CALLBACK_TOKEN, null);
+        if (sessionId < 0 || sessionId != expectedSessionId
+                || expectedCallbackToken == null || !expectedCallbackToken.equals(callbackToken)
+                || !isOwnedUpdateSession(sessionId)) {
+            return;
+        }
         int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
         if (status != PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            clearExpectedUpdateCallback();
             return;
         }
         Intent confirmationIntent = intent.getParcelableExtra(Intent.EXTRA_INTENT);
         if (confirmationIntent == null) {
+            clearExpectedUpdateCallback();
             return;
         }
+        clearExpectedUpdateCallback();
         try {
             startActivity(confirmationIntent);
         } catch (ActivityNotFoundException error) {
             Toast.makeText(this, getString(R.string.update_install_failed), Toast.LENGTH_LONG).show();
         }
+    }
+
+    private boolean isOwnedUpdateSession(int sessionId) {
+        for (PackageInstaller.SessionInfo sessionInfo
+                : getPackageManager().getPackageInstaller().getMySessions()) {
+            if (sessionInfo.getSessionId() == sessionId
+                    && getPackageName().equals(sessionInfo.getAppPackageName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void clearExpectedUpdateCallback() {
+        preferences.edit()
+                .remove(KEY_UPDATE_SESSION_ID)
+                .remove(KEY_UPDATE_CALLBACK_TOKEN)
+                .apply();
     }
 
     private void showUpdateVerifyFailed() {

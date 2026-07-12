@@ -6,6 +6,9 @@ import QRCode from 'qrcode';
 import { createPairingNonce, revokeDevice } from './auth.js';
 
 const HUB_MUTATION_HEADER = 'x-st-mobile-hub';
+const HUB_IDENTITY_HEADER = 'x-st-mobile-hub';
+const HUB_SERVICE_ID = 'sillytavern-mobile-auth-hub';
+const HUB_SCHEMA_VERSION = 1;
 const MAX_JSON_BODY_BYTES = 16 * 1024;
 
 function isLoopbackHost(host) {
@@ -46,6 +49,7 @@ function sendJson(res, status, value) {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
+    [HUB_IDENTITY_HEADER]: '1',
   });
   res.end(`${JSON.stringify(value)}\n`);
 }
@@ -57,6 +61,7 @@ function sendText(res, status, body, contentType = 'text/plain; charset=utf-8') 
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
     'x-frame-options': 'DENY',
+    [HUB_IDENTITY_HEADER]: '1',
   });
   res.end(body);
 }
@@ -189,9 +194,17 @@ function renderHubHtml() {
       <div class="error" id="error"></div>
     </section>
     <section>
-      <div class="tabs"><button class="tab" data-tab="devices">Devices</button><button class="tab" data-tab="attribution">Attribution</button></div>
+      <div class="tabs"><button class="tab" data-tab="devices">Devices</button><button class="tab" data-tab="desktop">Desktop</button><button class="tab" data-tab="attribution">Attribution</button></div>
       <div id="devices" class="tab-panel">
         <table><thead><tr><th>Status</th><th>Label</th><th>Last Seen</th><th>Device ID</th><th></th></tr></thead><tbody id="deviceRows"></tbody></table>
+      </div>
+      <div id="desktop" class="tab-panel" hidden>
+        <div class="stack">
+          <h2>Background tray host</h2>
+          <p>The ST Launcher home-menu option 1, <strong>Update &amp; Start SillyTavern</strong>, starts the authentication hub tray automatically without opening another window.</p>
+          <p>Right-click the SillyTavern Mobile icon under the taskbar hidden icons and toggle <strong>Start with Windows</strong> to opt in or out. At Windows login the tray waits quietly for SillyTavern; it does not launch SillyTavern by itself.</p>
+          <p class="muted">The tray host and every automatic child run hidden/no-focus at Windows Idle priority. Double-click the tray icon to return here.</p>
+        </div>
       </div>
       <div id="attribution" class="tab-panel" hidden>
         <div class="stack">
@@ -263,6 +276,8 @@ export async function createAuthHubServer(options) {
     const state = await options.store.load();
     const connections = options.getConnectionSnapshot?.() ?? new Map();
     return {
+      service: HUB_SERVICE_ID,
+      schemaVersion: HUB_SCHEMA_VERSION,
       gatewayUrl,
       devices: Object.values(state.devices)
         .map((device) => summarizeDevice(device, connections))

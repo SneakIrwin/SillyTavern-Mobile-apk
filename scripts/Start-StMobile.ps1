@@ -10,12 +10,16 @@ $ErrorActionPreference = 'Stop'
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 $GatewayRoot = Join-Path $ProjectRoot 'gateway'
 $GatewayCli = Join-Path $GatewayRoot 'src\cli.js'
+$CommonScript = Join-Path $PSScriptRoot 'StMobileTrayCommon.ps1'
+. $CommonScript
 $LogRoot = Join-Path $ProjectRoot 'logs'
 $StateRoot = Join-Path $ProjectRoot 'state'
 $CertRoot = Join-Path $StateRoot 'certs'
 $GatewayPidFile = Join-Path $StateRoot 'gateway.pid'
+$GatewayProcessRecord = Join-Path $StateRoot 'gateway-process.json'
 $HubUrlFile = Join-Path $StateRoot 'auth-hub.url'
 $SillyTavernPidFile = Join-Path $StateRoot 'sillytavern.pid'
+$SillyTavernProcessRecord = Join-Path $StateRoot 'sillytavern-process.json'
 $ProtectCertAcls = Join-Path $ProjectRoot 'scripts\Protect-CertAcls.ps1'
 $FirewallRuleName = 'SillyTavern Secure Mobile Gateway'
 
@@ -269,8 +273,60 @@ function Start-HiddenIdleProcess([string]$FilePath, [string[]]$ArgumentList, [st
         -RedirectStandardOutput $OutLog `
         -RedirectStandardError $ErrLog `
         -PassThru
-    Set-IdlePriority $process $Name
-    return $process
+    try {
+        [void][StMobile.PinnedFileOperations]::PinProcess($process)
+        $startIdentity = Get-StMobileProcessStartIdentity $process
+        if ([string]::IsNullOrWhiteSpace($startIdentity)) {
+            throw 'The canonical process start identity was empty.'
+        }
+        Set-IdlePriority $process $Name
+        return [pscustomobject]@{
+            Process = $process
+            ExpectedStartIdentity = $startIdentity
+        }
+    } catch {
+        $initializationFailure = $_.Exception.Message
+        try { [System.IO.File]::AppendAllText($ErrLog, "$Name post-start initialization failed: $initializationFailure$([Environment]::NewLine)") } catch {}
+        $cleanupFailure = $null
+        try {
+            $process.Refresh()
+            if (-not $process.HasExited) {
+                [void][StMobile.PinnedFileOperations]::PinProcess($process)
+                [StMobile.PinnedFileOperations]::TerminatePinnedProcess($process, 1)
+                $process.WaitForExit(10000) | Out-Null
+            }
+            if (-not $process.HasExited) {
+                throw "$Name PID $($process.Id) remained alive after exact post-start cleanup."
+            }
+        } catch {
+            $cleanupFailure = $_.Exception.Message
+        }
+        if ($cleanupFailure) {
+            throw "$Name launch initialization failed after Process.Start for PID $($process.Id): $initializationFailure Exact-handle cleanup blocked: $cleanupFailure The process may still be live and no ownership record was published."
+        }
+        throw "$Name launch initialization failed after Process.Start for PID $($process.Id), and the exact child was terminated or had already exited: $initializationFailure"
+    }
+}
+
+function Stop-JustLaunchedProcessAndConfirm {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$ExpectedStartIdentity,
+        [string]$Name
+    )
+    $Process.Refresh()
+    if ($Process.HasExited) {
+        return
+    }
+    Assert-StMobilePinnedProcessIdentity `
+        -Process $Process `
+        -ExpectedProcessStartTimeUtc $ExpectedStartIdentity `
+        -OwnershipName $Name
+    [StMobile.PinnedFileOperations]::TerminatePinnedProcess($Process, 1)
+    $Process.WaitForExit(10000) | Out-Null
+    if (-not $Process.HasExited) {
+        throw "$Name PID $($Process.Id) remained alive after exact just-launched forced termination."
+    }
 }
 
 function Test-LoopbackSillyTavern {
@@ -321,6 +377,14 @@ function Assert-SillyTavernIdentity {
         $commands = ($ownerProcesses | ForEach-Object { "PID $($_.ProcessId): $($_.CommandLine)" }) -join '; '
         throw "Loopback port 3000 fingerprinted as SillyTavern HTML but no owning process looked like the expected server.js process. $commands"
     }
+    $trustedSession = Get-SillyTavernSession `
+        -Port 3000 `
+        -SillyTavernRoot $SillyTavernRoot `
+        -RecordPath $SillyTavernProcessRecord `
+        -ThrowOnInvalid
+    if (-not $trustedSession) {
+        throw "Loopback SillyTavern has no exact trusted launcher record at $SillyTavernProcessRecord. Start it through ST Launcher option 1 before exposing the mobile gateway."
+    }
 }
 
 function Get-GatewayListener {
@@ -334,6 +398,9 @@ function Assert-GatewayListenerExpected {
     }
 
     $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue
+    if (-not $process -or [string]::IsNullOrWhiteSpace([string]$process.CommandLine)) {
+        throw "Gateway port $Port listener PID $($listener.OwningProcess) vanished or has no readable command line; refusing to trust it."
+    }
     $commandLine = $process.CommandLine
     $expectedCli = (Resolve-Path $GatewayCli).Path
     $normalizedExpectedCli = $expectedCli.Replace('/', '\')
@@ -365,23 +432,163 @@ function Assert-GatewayListenerExpected {
         throw "Gateway port $Port listener PID $($listener.OwningProcess) explicitly disabled the auth hub."
     }
     if (Test-Path $GatewayPidFile) {
-        $expectedPid = [int](Get-Content -Raw -LiteralPath $GatewayPidFile)
+        $listenerPidSnapshot = [StMobile.PinnedFileOperations]::ReadSnapshot(
+            [System.IO.Path]::GetFullPath($GatewayPidFile), '')
+        $expectedPid = Read-StMobileCanonicalPositivePidBytes $listenerPidSnapshot.Bytes 'Gateway'
         if ($expectedPid -ne [int]$listener.OwningProcess) {
             throw "Gateway port $Port is owned by PID $($listener.OwningProcess), but gateway pid file names $expectedPid. Refusing to reuse ambiguous listener."
         }
     } else {
         throw "Gateway port $Port is already listening but $GatewayPidFile is missing. Refusing to reuse listener without launcher provenance."
     }
-    $gatewayProcess = Get-Process -Id $listener.OwningProcess -ErrorAction Stop
+    $listenerRecordSnapshot = [StMobile.PinnedFileOperations]::ReadSnapshot(
+        [System.IO.Path]::GetFullPath($GatewayProcessRecord), '')
+    $gatewayOwnership = Get-StMobileGatewayOwnershipState `
+        -RecordPath $GatewayProcessRecord `
+        -RecordSnapshot $listenerRecordSnapshot `
+        -NodeExe $node `
+        -GatewayCli $GatewayCli `
+        -PublicHost $PublicHost `
+        -Port $Port `
+        -HubPort $HubPort `
+        -RequireListeners
+    if ($gatewayOwnership.State -ne 'OwnedLive' `
+            -or $gatewayOwnership.Verified.Process.Id -ne [int]$listener.OwningProcess) {
+        throw "Gateway port $Port listener lacks an exact live ownership record at $GatewayProcessRecord."
+    }
+    $gatewayProcess = $gatewayOwnership.Verified.Process
+    $gatewayStartIdentity = [string]$gatewayOwnership.Verified.Record.processStartTimeUtc
+    Assert-StMobilePinnedProcessIdentity `
+        -Process $gatewayProcess `
+        -ExpectedProcessStartTimeUtc $gatewayStartIdentity `
+        -OwnershipName 'existing ST Mobile Gateway'
     if ($gatewayProcess.PriorityClass -ne [System.Diagnostics.ProcessPriorityClass]::Idle) {
+        Assert-StMobilePinnedProcessIdentity `
+            -Process $gatewayProcess `
+            -ExpectedProcessStartTimeUtc $gatewayStartIdentity `
+            -OwnershipName 'existing ST Mobile Gateway'
         Set-IdlePriority $gatewayProcess 'existing ST Mobile Gateway'
         Start-Sleep -Milliseconds 100
-        $gatewayProcess = Get-Process -Id $listener.OwningProcess -ErrorAction Stop
+        Assert-StMobilePinnedProcessIdentity `
+            -Process $gatewayProcess `
+            -ExpectedProcessStartTimeUtc $gatewayStartIdentity `
+            -OwnershipName 'existing ST Mobile Gateway'
+        $gatewayProcess.Refresh()
         if ($gatewayProcess.PriorityClass -ne [System.Diagnostics.ProcessPriorityClass]::Idle) {
             throw "Gateway port $Port listener PID $($listener.OwningProcess) is not Idle priority."
         }
     }
     return $true
+}
+
+function Clear-StaleGatewayOwnershipForLaunch {
+    $pidExists = Test-Path -LiteralPath $GatewayPidFile
+    $recordExists = Test-Path -LiteralPath $GatewayProcessRecord
+    if (-not $pidExists -and -not $recordExists) {
+        if (Test-Path -LiteralPath $HubUrlFile) {
+            throw 'An orphaned or foreign auth-hub URL record exists without gateway ownership; refusing overwrite.'
+        }
+        return
+    }
+    if ($pidExists -ne $recordExists) {
+        throw 'Gateway ownership state is incomplete; refusing to overwrite either record.'
+    }
+    $stalePidSnapshot = [StMobile.PinnedFileOperations]::ReadSnapshot([System.IO.Path]::GetFullPath($GatewayPidFile), '')
+    $staleRecordSnapshot = [StMobile.PinnedFileOperations]::ReadSnapshot([System.IO.Path]::GetFullPath($GatewayProcessRecord), '')
+    $stalePidBytes = $stalePidSnapshot.Bytes
+    $staleRecordBytes = $staleRecordSnapshot.Bytes
+    try {
+        $record = Get-Content -LiteralPath $GatewayProcessRecord -Raw | ConvertFrom-Json
+    } catch {
+        throw "Gateway ownership record is invalid; refusing overwrite: $($_.Exception.Message)"
+    }
+    $pidValue = Read-StMobileCanonicalPositivePidBytes $stalePidBytes 'Gateway'
+    if ($pidValue -ne [int]$record.pid) {
+        throw 'Gateway numeric PID and JSON ownership records do not agree; refusing overwrite.'
+    }
+    $gatewayOwnership = Get-StMobileGatewayOwnershipState `
+        -RecordPath $GatewayProcessRecord `
+        -RecordSnapshot $staleRecordSnapshot `
+        -NodeExe $node `
+        -GatewayCli $GatewayCli `
+        -PublicHost $PublicHost `
+        -Port $Port `
+        -HubPort $HubPort
+    if ($gatewayOwnership.State -eq 'Conflict') {
+        throw "Gateway ownership conflict; refusing overwrite: $($gatewayOwnership.Error)"
+    }
+    if ($gatewayOwnership.State -eq 'OwnedLive') {
+        throw "Exact-owned gateway PID $($gatewayOwnership.Verified.Process.Id) is still alive without the expected listener; refusing to overwrite its records."
+    }
+    if ($gatewayOwnership.State -ne 'OwnedStale') {
+        throw "Gateway ownership classification changed unexpectedly: $($gatewayOwnership.State)"
+    }
+    $staleGatewayEntries = @(
+        [pscustomobject]@{ Path = $GatewayPidFile; Bytes = $stalePidBytes; ParentToken = $stalePidSnapshot.ParentToken; FileToken = $stalePidSnapshot.FileToken },
+        [pscustomobject]@{ Path = $GatewayProcessRecord; Bytes = $staleRecordBytes; ParentToken = $staleRecordSnapshot.ParentToken; FileToken = $staleRecordSnapshot.FileToken })
+    if (Test-Path -LiteralPath $HubUrlFile) {
+        $staleHub = Publish-StMobileAuthHubUrlRecord `
+            -Path $HubUrlFile `
+            -GatewayRecord $record `
+            -AllowLegacyUrlCas
+        $staleGatewayEntries += [pscustomobject]@{ Path = $HubUrlFile; Bytes = $staleHub.Bytes; ParentToken = $staleHub.ParentToken; FileToken = $staleHub.FileToken }
+    }
+    Remove-StMobileFileSetIfUnchanged `
+        -OwnershipName 'stale gateway ownership set' `
+        -Entries $staleGatewayEntries
+}
+
+function Clear-StaleSillyTavernOwnershipForLaunch {
+    $pidExists = Test-Path -LiteralPath $SillyTavernPidFile
+    $recordExists = Test-Path -LiteralPath $SillyTavernProcessRecord
+    if (-not $pidExists -and -not $recordExists) {
+        return
+    }
+    if ($pidExists -ne $recordExists) {
+        throw 'SillyTavern ownership state is incomplete; refusing to overwrite either record.'
+    }
+    $pidSnapshot = [StMobile.PinnedFileOperations]::ReadSnapshot([System.IO.Path]::GetFullPath($SillyTavernPidFile), '')
+    $recordSnapshot = [StMobile.PinnedFileOperations]::ReadSnapshot([System.IO.Path]::GetFullPath($SillyTavernProcessRecord), '')
+    $pidBytes = $pidSnapshot.Bytes
+    $recordBytes = $recordSnapshot.Bytes
+    $pidValue = Read-StMobileCanonicalPositivePidBytes $pidBytes 'SillyTavern'
+    try {
+        $record = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($recordBytes) | ConvertFrom-Json
+    } catch {
+        throw "SillyTavern ownership record is invalid; refusing overwrite: $($_.Exception.Message)"
+    }
+    $serverScript = [System.IO.Path]::GetFullPath((Join-Path $SillyTavernRoot 'server.js'))
+    $legacyFields = @(
+        'schema', 'pid', 'processStartTimeUtc', 'executablePath', 'sillyTavernRoot',
+        'serverScriptPath', 'provenance', 'instanceId')
+    $legacyExact = (Test-StMobileExactPropertySet $record $legacyFields) `
+        -and $record.schema -ceq 'st-mobile-sillytavern-process/v1' `
+        -and (Test-StMobileJsonInteger $record.pid) `
+        -and [int64]$record.pid -gt 0 `
+        -and (Test-StMobileCanonicalProcessStartIdentity $record.processStartTimeUtc) `
+        -and (Test-StMobileCanonicalGuid $record.instanceId) `
+        -and (Test-StMobileCanonicalAbsolutePath $record.executablePath) `
+        -and (Test-StMobileCanonicalAbsolutePath $record.sillyTavernRoot) `
+        -and (Test-StMobileCanonicalAbsolutePath $record.serverScriptPath) `
+        -and [string]$record.executablePath -ceq [System.IO.Path]::GetFullPath($node) `
+        -and [string]$record.sillyTavernRoot -ceq [System.IO.Path]::GetFullPath($SillyTavernRoot) `
+        -and [string]$record.serverScriptPath -ceq $serverScript `
+        -and $record.provenance -cin @('st-launcher-option-1', 'start-st-mobile')
+    $currentExact = Test-StMobileSillyTavernRecordStructure `
+        -Record $record `
+        -ExpectedRoot $SillyTavernRoot `
+        -ExpectedServerScript $serverScript `
+        -ExpectedExecutablePath $node
+    if ((-not $legacyExact -and -not $currentExact) -or [int]$record.pid -ne $pidValue) {
+        throw 'SillyTavern PID and JSON ownership records are foreign, modified, or disagree; refusing overwrite.'
+    }
+    $candidate = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
+    if ($candidate -and (Get-StMobileProcessStartIdentity $candidate) -ceq $record.processStartTimeUtc) {
+        throw "Exact-owned SillyTavern PID $pidValue is still alive; refusing to overwrite its ownership set."
+    }
+    Remove-StMobileFileSetIfUnchanged -OwnershipName 'stale SillyTavern ownership set' -Entries @(
+        [pscustomobject]@{ Path = $SillyTavernPidFile; Bytes = $pidBytes; ParentToken = $pidSnapshot.ParentToken; FileToken = $pidSnapshot.FileToken },
+        [pscustomobject]@{ Path = $SillyTavernProcessRecord; Bytes = $recordBytes; ParentToken = $recordSnapshot.ParentToken; FileToken = $recordSnapshot.FileToken })
 }
 
 function Assert-GatewayReadyThroughCli {
@@ -478,17 +685,54 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if (-not $NoStartSillyTavern -and -not (Test-LoopbackSillyTavern)) {
-    if (-not (Test-Path (Join-Path $SillyTavernRoot 'server.js'))) {
+    Clear-StaleSillyTavernOwnershipForLaunch
+    $serverScript = [System.IO.Path]::GetFullPath((Join-Path $SillyTavernRoot 'server.js'))
+    if (-not (Test-Path -LiteralPath $serverScript)) {
         throw "SillyTavern server.js not found under $SillyTavernRoot"
     }
-    $stProcess = Start-HiddenIdleProcess `
+    $stLaunch = Start-HiddenIdleProcess `
         -FilePath $node `
-        -ArgumentList @('server.js') `
+        -ArgumentList @($serverScript) `
         -WorkingDirectory $SillyTavernRoot `
         -Name 'SillyTavern' `
         -OutLog (Join-Path $LogRoot 'sillytavern.out.log') `
         -ErrLog (Join-Path $LogRoot 'sillytavern.err.log')
-    Set-Content -LiteralPath $SillyTavernPidFile -Value $stProcess.Id
+    $stProcess = $stLaunch.Process
+    $stProcessStartIdentity = $stLaunch.ExpectedStartIdentity
+    $stPidPublished = $false
+    try {
+        $stPidBytesWritten = (New-Object System.Text.ASCIIEncoding).GetBytes(
+            ([string]$stProcess.Id) + [Environment]::NewLine)
+        $stPidIdentity = Write-StMobileBytesCreateNew $SillyTavernPidFile $stPidBytesWritten -PassThru
+        $stPidPublished = $true
+        $launchedSession = [pscustomobject]@{
+            Pid = $stProcess.Id
+            ProcessStartTimeUtc = $stProcessStartIdentity
+            ExecutablePath = $node
+            SillyTavernRoot = [System.IO.Path]::GetFullPath($SillyTavernRoot)
+            ServerScriptPath = $serverScript
+            RootProofMethod = 'absolute-server-argv-v1'
+            RootProofAtUtc = [DateTime]::UtcNow.ToString(
+                "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
+                [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        [void](Write-StMobileSillyTavernRecord `
+            -Session $launchedSession `
+            -RecordPath $SillyTavernProcessRecord `
+            -Provenance 'start-st-mobile')
+    } catch {
+        $publicationFailure = $_.Exception.Message
+        try {
+            Stop-JustLaunchedProcessAndConfirm $stProcess $stProcessStartIdentity 'SillyTavern'
+        } catch {
+            throw "Could not publish exact SillyTavern launch ownership: $publicationFailure Cleanup blocked: $($_.Exception.Message) Ownership files were preserved."
+        }
+        if ($stPidPublished -and (Test-Path -LiteralPath $SillyTavernPidFile)) {
+            Remove-StMobileFileIfUnchanged $SillyTavernPidFile $stPidBytesWritten 'failed SillyTavern launch PID record' `
+                $stPidIdentity.ParentToken $stPidIdentity.FileToken
+        }
+        throw "Could not publish exact SillyTavern launch ownership: $publicationFailure"
+    }
 }
 
 Assert-SillyTavernPortSafe
@@ -497,14 +741,67 @@ Assert-SillyTavernIdentity
 if (Assert-GatewayListenerExpected) {
     Write-Host "Gateway port $Port is already listening."
 } else {
-    $gatewayProcess = Start-HiddenIdleProcess `
+    Clear-StaleGatewayOwnershipForLaunch
+    $gatewayLaunch = Start-HiddenIdleProcess `
         -FilePath $node `
         -ArgumentList @($GatewayCli, 'serve', '--host', $PublicHost, '--port', "$Port", '--hub-port', "$HubPort") `
         -WorkingDirectory $ProjectRoot `
         -Name 'ST Mobile Gateway' `
         -OutLog (Join-Path $LogRoot 'gateway.out.log') `
         -ErrLog (Join-Path $LogRoot 'gateway.err.log')
-    Set-Content -LiteralPath $GatewayPidFile -Value $gatewayProcess.Id
+    $gatewayProcess = $gatewayLaunch.Process
+    $gatewayProcessStartIdentity = $gatewayLaunch.ExpectedStartIdentity
+    try {
+        $gatewayWrittenEntries = New-Object 'System.Collections.Generic.List[object]'
+        $gatewayPidBytesWritten = (New-Object System.Text.ASCIIEncoding).GetBytes(
+            ([string]$gatewayProcess.Id) + [Environment]::NewLine)
+        $gatewayPidIdentity = Write-StMobileBytesCreateNew $GatewayPidFile $gatewayPidBytesWritten -PassThru
+        $gatewayWrittenEntries.Add([pscustomobject]@{ Path = $GatewayPidFile; Bytes = $gatewayPidBytesWritten; ParentToken = $gatewayPidIdentity.ParentToken; FileToken = $gatewayPidIdentity.FileToken })
+        $gatewayRecord = [ordered]@{
+            schema = 'st-mobile-gateway-process/v1'
+            pid = $gatewayProcess.Id
+            processStartTimeUtc = $gatewayProcessStartIdentity
+            executablePath = $node
+            cliPath = [System.IO.Path]::GetFullPath($GatewayCli)
+            publicHost = $PublicHost
+            port = $Port
+            hubPort = $HubPort
+            instanceId = [guid]::NewGuid().ToString()
+        }
+        $recordJson = ($gatewayRecord | ConvertTo-Json) + [Environment]::NewLine
+        $gatewayRecordBytesWritten = (New-Object System.Text.UTF8Encoding($false)).GetBytes($recordJson)
+        $gatewayRecordIdentity = Write-StMobileBytesCreateNew $GatewayProcessRecord $gatewayRecordBytesWritten -PassThru
+        $gatewayWrittenEntries.Add([pscustomobject]@{ Path = $GatewayProcessRecord; Bytes = $gatewayRecordBytesWritten; ParentToken = $gatewayRecordIdentity.ParentToken; FileToken = $gatewayRecordIdentity.FileToken })
+        $verifiedGatewayForPublication = Get-VerifiedStMobileGatewayProcess `
+            -RecordPath $GatewayProcessRecord `
+            -NodeExe $node `
+            -GatewayCli $GatewayCli `
+            -PublicHost $PublicHost `
+            -Port $Port `
+            -HubPort $HubPort `
+            -ThrowOnInvalid
+        if (-not $verifiedGatewayForPublication) {
+            throw 'The just-launched gateway did not match its exact ownership record.'
+        }
+        $publishedHubRecord = Publish-StMobileAuthHubUrlRecord `
+            -Path $HubUrlFile `
+            -GatewayRecord $verifiedGatewayForPublication.Record `
+            -AllowLegacyUrlCas
+        $gatewayWrittenEntries.Add([pscustomobject]@{ Path = $HubUrlFile; Bytes = $publishedHubRecord.Bytes; ParentToken = $publishedHubRecord.ParentToken; FileToken = $publishedHubRecord.FileToken })
+    } catch {
+        $publicationFailure = $_.Exception.Message
+        try {
+            Stop-JustLaunchedProcessAndConfirm $gatewayProcess $gatewayProcessStartIdentity 'ST Mobile Gateway'
+        } catch {
+            throw "Could not write the exact gateway process ownership record: $publicationFailure Cleanup blocked: $($_.Exception.Message) Ownership files were preserved."
+        }
+        if ($gatewayWrittenEntries -and $gatewayWrittenEntries.Count -gt 0) {
+            Remove-StMobileFileSetIfUnchanged `
+                -Entries @($gatewayWrittenEntries) `
+                -OwnershipName 'failed gateway launch ownership set'
+        }
+        throw "Could not write the exact gateway process ownership record: $publicationFailure"
+    }
 }
 
 $deadline = (Get-Date).AddSeconds(20)
@@ -524,7 +821,22 @@ Assert-GatewayReadyThroughCli
 Assert-AuthHubReady
 
 node $GatewayCli info --host $PublicHost --port $Port
-Set-Content -LiteralPath $HubUrlFile -Value "http://127.0.0.1:$HubPort/"
+$verifiedGatewayForHubRecord = Get-VerifiedStMobileGatewayProcess `
+    -RecordPath $GatewayProcessRecord `
+    -NodeExe $node `
+    -GatewayCli $GatewayCli `
+    -PublicHost $PublicHost `
+    -Port $Port `
+    -HubPort $HubPort `
+    -RequireListeners `
+    -ThrowOnInvalid
+if (-not $verifiedGatewayForHubRecord) {
+    throw 'Gateway readiness passed without a live exact-owned gateway instance; refusing auth-hub URL publication.'
+}
+[void](Publish-StMobileAuthHubUrlRecord `
+    -Path $HubUrlFile `
+    -GatewayRecord $verifiedGatewayForHubRecord.Record `
+    -AllowLegacyUrlCas)
 Write-Host "Auth hub: http://127.0.0.1:$HubPort/"
 Write-Host "Generate a QR with: node `"$GatewayCli`" pair --host $PublicHost --port $Port --label `"S24 Ultra`""
 Write-Host "Open the auth hub with: Start-Process http://127.0.0.1:$HubPort/"

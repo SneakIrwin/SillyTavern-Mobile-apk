@@ -47,8 +47,8 @@ test('WebView wrapper has origin lock and no unsafe bridge or SSL bypass', async
   assert.match(source, /ACTION_OPEN_DOCUMENT/);
   assert.match(source, /setWebContentsDebuggingEnabled\(false\)/);
   assert.match(source, /SOFT_INPUT_ADJUST_RESIZE/);
-  assert.match(source, /addOnGlobalLayoutListener\(this::applyKeyboardInset\)/);
-  assert.match(source, /getWindowVisibleDisplayFrame/);
+  assert.match(source, /configureWindowInsets\(\)/);
+  assert.doesNotMatch(source, /addOnGlobalLayoutListener|applyLegacyKeyboardInset|getWindowVisibleDisplayFrame/);
   assert.match(source, /uriFromSslError/);
   assert.match(source, /isPendingGatewayOrigin\(errorUri\)/);
   assert.doesNotMatch(source, /pendingGatewayOrigin != null\) \{\s*clearPendingPairing/);
@@ -68,6 +68,24 @@ test('native wrapper does not consume live SillyTavern viewport space', async ()
   assert.match(showGatewayLoadFailed, /forgetButton\.setVisibility\(View\.VISIBLE\)/);
 });
 
+test('Android edge-to-edge content stays inside system bars, cutouts, and the IME', async () => {
+  const build = await text('android/app/build.gradle');
+  const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
+
+  assert.match(build, /targetSdk 36/);
+  assert.match(source, /setDecorFitsSystemWindows\(false\)/);
+  assert.match(source, /setOnApplyWindowInsetsListener/);
+  assert.match(source, /WindowInsets\.Type\.systemBars\(\) \| WindowInsets\.Type\.displayCutout\(\)/);
+  assert.match(source, /WindowInsets\.Type\.ime\(\)/);
+  assert.match(source, /Math\.max\(systemBars\.bottom, ime\.bottom\)/);
+  assert.match(source, /root\.setPadding\(systemBars\.left, systemBars\.top, systemBars\.right, bottomInset\)/);
+  assert.match(source, /root\.requestApplyInsets\(\)/);
+  assert.match(source, /Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.R/);
+  assert.match(source, /SOFT_INPUT_ADJUST_RESIZE/);
+  assert.doesNotMatch(source, /addOnGlobalLayoutListener|applyLegacyKeyboardInset|getWindowVisibleDisplayFrame/);
+  assert.doesNotMatch(source, /setSystemUiVisibility\([^)]*LAYOUT_HIDE_NAVIGATION/);
+});
+
 test('launch updater is normal user-approved PackageInstaller flow only', async () => {
   const manifest = await text('android/app/src/main/AndroidManifest.xml');
   const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
@@ -82,6 +100,12 @@ test('launch updater is normal user-approved PackageInstaller flow only', async 
   assert.match(source, /Intent\.EXTRA_INTENT/);
   assert.match(source, /startActivity\(confirmationIntent\)/);
   assert.match(source, /FLAG_MUTABLE/);
+  assert.match(source, /UUID\.randomUUID\(\)/);
+  assert.match(source, /PackageInstaller\.EXTRA_SESSION_ID/);
+  assert.match(source, /getMySessions\(\)/);
+  assert.match(source, /getPackageName\(\)\.equals\(sessionInfo\.getAppPackageName\(\)\)/);
+  assert.match(source, /expectedCallbackToken\.equals\(callbackToken\)/);
+  assert.match(source, /clearExpectedUpdateCallback\(\)/);
   assert.doesNotMatch(source, /USER_ACTION_NOT_REQUIRED/);
   assert.doesNotMatch(source, /FLAG_IMMUTABLE/);
   assert.doesNotMatch(source, /Runtime\.getRuntime|ProcessBuilder|exec\s*\(|\bsu\b|pm install|DevicePolicyManager|DeviceAdminReceiver/);

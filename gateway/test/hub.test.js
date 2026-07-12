@@ -214,7 +214,11 @@ test('auth hub generates pairing QR, tracks connected devices, and revokes live 
     assert.match(pair.qrDataUrl, /^data:image\/png;base64,/);
     assert.match(pair.pairUrl, new RegExp(`^${gateway.url.replaceAll('.', '\\.')}\\/__mobile\\/pair\\/`));
 
-    let devices = await fetch(`${gateway.hubUrl}/api/devices`).then((response) => response.json());
+    const identityResponse = await fetch(`${gateway.hubUrl}/api/devices`);
+    assert.equal(identityResponse.headers.get('x-st-mobile-hub'), '1');
+    let devices = await identityResponse.json();
+    assert.equal(devices.service, 'sillytavern-mobile-auth-hub');
+    assert.equal(devices.schemaVersion, 1);
     assert.equal(devices.pendingPairings.length, 1);
     assert.equal(devices.devices.length, 0);
 
