@@ -53,7 +53,6 @@ try {
     if (-not (Test-AuthHubReady)) {
         Write-OneClickLog 'STACK_START requested=true'
         & $StartScript -Port $Port -HubPort $HubPort -SillyTavernRoot $SillyTavernRoot | Out-Null
-        & $LaunchTrayScript -HubPort $HubPort -SillyTavernPort 3000 -SillyTavernRoot $SillyTavernRoot -LauncherIconPath $LauncherIconPath | Out-Null
     }
 
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -63,6 +62,11 @@ try {
     if (-not (Test-AuthHubReady)) {
         throw "Authentication hub did not become ready at $HubUrl. See $LogPath."
     }
+
+    # The hub and tray have independent lifetimes. Always ensure the tray even
+    # when a pre-existing gateway made the hub readiness check succeed.
+    & $LaunchTrayScript -HubPort $HubPort -SillyTavernPort 3000 -SillyTavernRoot $SillyTavernRoot -LauncherIconPath $LauncherIconPath | Out-Null
+    Write-OneClickLog 'TRAY_ENSURED hidden=true no_focus=true priority=Idle'
 
     Write-OneClickLog "HUB_OPEN url=$HubUrl intentional_user_facing=true"
     Start-Process $HubUrl

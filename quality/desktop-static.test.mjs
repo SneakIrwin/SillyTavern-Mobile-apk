@@ -1235,7 +1235,8 @@ test('Desktop AI Tools shortcut is a hidden one-click full-stack bootstrap', asy
   const install = await text('scripts/Install-DesktopAiToolsShortcut.ps1');
   assert.match(open, /PriorityClass\s*=\s*\[System\.Diagnostics\.ProcessPriorityClass\]::Idle/);
   assert.match(open, /Test-AuthHubReady/);
-  assert.match(open, /& \$StartScript[\s\S]*& \$LaunchTrayScript[\s\S]*Test-AuthHubReady[\s\S]*Start-Process \$HubUrl/);
+  assert.match(open, /& \$StartScript[\s\S]*Test-AuthHubReady[\s\S]*& \$LaunchTrayScript[\s\S]*Start-Process \$HubUrl/);
+  assert.match(open, /independent lifetimes[\s\S]*Always ensure the tray/);
   assert.match(open, /X-ST-Mobile-Hub/);
   assert.match(install, /SillyTavern Mobile Auth Hub\.lnk/);
   assert.match(install, /-WindowStyle Hidden -File/);
