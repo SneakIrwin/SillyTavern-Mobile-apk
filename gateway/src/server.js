@@ -1,11 +1,27 @@
 import http from 'node:http';
 import https from 'node:https';
+import { readFileSync } from 'node:fs';
 import net from 'node:net';
 import { URL } from 'node:url';
 
 import { COOKIE_NAME, consumePairingNonce, parseCookies, validateRequestSession } from './auth.js';
 import { ensureCertificates } from './certs.js';
 import { createAuthHubServer } from './hub.js';
+import {
+  createStreamRelayManager,
+  isRelayCandidateRequest,
+  RELAY_CLIENT_PATH,
+  RELAY_ID_HEADER,
+  RELAY_OFFSET_HEADER,
+  relayCancelId,
+} from './stream-relay.js';
+
+const STREAM_RELAY_CLIENT_SOURCE = readFileSync(
+  new URL('../public/stream-relay-client.js', import.meta.url),
+  'utf8',
+);
+const STREAM_RELAY_SCRIPT_TAG = `<script src="${RELAY_CLIENT_PATH}" data-st-mobile-stream-relay="v1"></script>`;
+const MAX_INJECTED_HTML_BYTES = 4 * 1024 * 1024;
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -58,7 +74,11 @@ function stripGatewayCookie(cookieHeader) {
   return kept.join('; ');
 }
 
-function proxyHeaders(req, { forUpgrade = false } = {}) {
+function proxyHeaders(req, {
+  forUpgrade = false,
+  forceIdentityEncoding = false,
+  stripRepresentationConditions = false,
+} = {}) {
   const headers = {};
   for (const [key, value] of Object.entries(req.headers)) {
     const lower = key.toLowerCase();
@@ -66,6 +86,13 @@ function proxyHeaders(req, { forUpgrade = false } = {}) {
       continue;
     }
     if (forUpgrade && ['proxy-authenticate', 'proxy-authorization'].includes(lower)) {
+      continue;
+    }
+    if (lower === RELAY_ID_HEADER || lower === RELAY_OFFSET_HEADER) {
+      continue;
+    }
+    if (stripRepresentationConditions
+        && ['if-match', 'if-modified-since', 'if-none-match', 'if-range', 'if-unmodified-since', 'range'].includes(lower)) {
       continue;
     }
     headers[key] = value;
@@ -81,6 +108,9 @@ function proxyHeaders(req, { forUpgrade = false } = {}) {
   if (forUpgrade) {
     headers.connection = 'Upgrade';
     headers.upgrade = req.headers.upgrade ?? 'websocket';
+  }
+  if (forceIdentityEncoding) {
+    headers['accept-encoding'] = 'identity';
   }
 
   return headers;
@@ -100,7 +130,57 @@ function writeHeaderLines(socket, method, url, httpVersion, headers) {
   socket.write('\r\n');
 }
 
-function proxyHttp(targetUrl, req, res) {
+function shouldInjectStreamRelayClient(req) {
+  if (req.method !== 'GET') {
+    return false;
+  }
+  let parsed;
+  try {
+    parsed = new URL(req.url, 'http://localhost');
+  } catch {
+    return false;
+  }
+  if (parsed.pathname !== '/') {
+    return false;
+  }
+  const destination = String(req.headers['sec-fetch-dest'] ?? '').toLowerCase();
+  const accept = String(req.headers.accept ?? '').toLowerCase();
+  return destination === 'document' || accept.includes('text/html');
+}
+
+function injectedHtmlHeaders(upstreamHeaders, bodyLength) {
+  const headers = { ...upstreamHeaders };
+  for (const name of [
+    'content-encoding',
+    'content-length',
+    'content-md5',
+    'digest',
+    'etag',
+    'accept-ranges',
+    'transfer-encoding',
+  ]) {
+    delete headers[name];
+  }
+  headers['content-length'] = String(bodyLength);
+  headers['cache-control'] = 'no-store';
+  headers['x-st-mobile-stream-relay'] = 'v1';
+  return headers;
+}
+
+function injectStreamRelayClient(body) {
+  if (body.includes(STREAM_RELAY_SCRIPT_TAG)) {
+    return body;
+  }
+  const lower = body.toLowerCase();
+  const headStart = lower.indexOf('<head');
+  const headEnd = headStart < 0 ? -1 : lower.indexOf('>', headStart);
+  if (headEnd < 0) {
+    throw new Error('HTML document has no injectable head element');
+  }
+  return `${body.slice(0, headEnd + 1)}${STREAM_RELAY_SCRIPT_TAG}${body.slice(headEnd + 1)}`;
+}
+
+function proxyHttp(targetUrl, req, res, { injectRelayClient = false } = {}) {
   const client = targetUrl.protocol === 'https:' ? https : http;
   const upstream = client.request({
     protocol: targetUrl.protocol,
@@ -108,8 +188,55 @@ function proxyHttp(targetUrl, req, res) {
     port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
     method: req.method,
     path: req.url,
-    headers: proxyHeaders(req),
+    headers: proxyHeaders(req, {
+      forceIdentityEncoding: injectRelayClient,
+      stripRepresentationConditions: injectRelayClient,
+    }),
   }, (upstreamRes) => {
+    const contentType = String(upstreamRes.headers['content-type'] ?? '').toLowerCase();
+    if (injectRelayClient && upstreamRes.statusCode === 200 && contentType.includes('text/html')) {
+      const contentEncoding = String(upstreamRes.headers['content-encoding'] ?? 'identity').toLowerCase();
+      if (contentEncoding !== 'identity') {
+        upstreamRes.resume();
+        res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+        res.end('Gateway HTML injection refused an encoded upstream document\n');
+        return;
+      }
+      const chunks = [];
+      let length = 0;
+      upstreamRes.on('data', (chunk) => {
+        length += chunk.length;
+        if (length > MAX_INJECTED_HTML_BYTES) {
+          upstreamRes.destroy(new Error('SillyTavern HTML exceeds the mobile relay injection limit'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      upstreamRes.on('end', () => {
+        if (res.destroyed) {
+          return;
+        }
+        try {
+          const injected = Buffer.from(injectStreamRelayClient(Buffer.concat(chunks, length).toString('utf8')), 'utf8');
+          res.writeHead(
+            upstreamRes.statusCode ?? 502,
+            upstreamRes.statusMessage,
+            injectedHtmlHeaders(upstreamRes.headers, injected.length),
+          );
+          res.end(injected);
+        } catch (error) {
+          res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(`Gateway HTML injection error: ${error.message}\n`);
+        }
+      });
+      upstreamRes.on('error', (error) => {
+        if (!res.headersSent && !res.destroyed) {
+          res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+          res.end(`Gateway HTML injection error: ${error.message}\n`);
+        }
+      });
+      return;
+    }
     res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.statusMessage, upstreamRes.headers);
     upstreamRes.pipe(res);
   });
@@ -154,6 +281,14 @@ export async function createGatewayServer(options) {
 
   const activeSockets = new Map();
   const trackedSockets = new WeakSet();
+  const relayManager = createStreamRelayManager({
+    targetUrl,
+    limits: options.relayLimits,
+    buildUpstreamHeaders: (req, bodyLength) => ({
+      ...proxyHeaders(req, { forceIdentityEncoding: true }),
+      'content-length': String(bodyLength),
+    }),
+  });
 
   function logLastSeenTouchError(error) {
     console.warn(`[st-mobile-gateway] lastSeenAt update skipped: ${error.message}`);
@@ -189,9 +324,18 @@ export async function createGatewayServer(options) {
 
   async function closeRevokedSockets() {
     const state = await store.load();
+    const validTokenHashes = new Set(Object.values(state.devices)
+      .filter((device) => !device.revokedAt)
+      .map((device) => device.tokenHash));
+    for (const ownerTokenHash of relayManager.ownerTokenHashes()) {
+      if (!validTokenHashes.has(ownerTokenHash)) {
+        relayManager.cancelOwner(ownerTokenHash);
+      }
+    }
     for (const [tokenHash, sockets] of activeSockets) {
       const device = Object.values(state.devices).find((candidate) => candidate.tokenHash === tokenHash);
       if (!device || device.revokedAt) {
+        relayManager.cancelOwner(tokenHash);
         for (const socket of sockets) {
           socket.destroy();
         }
@@ -242,7 +386,54 @@ export async function createGatewayServer(options) {
       }
 
       trackSocket(device, req.socket);
-      proxyHttp(targetUrl, req, res);
+      const pathname = new URL(req.url, 'http://localhost').pathname;
+      if (pathname === RELAY_CLIENT_PATH) {
+        if (req.method !== 'GET') {
+          res.writeHead(405, { allow: 'GET', 'cache-control': 'no-store' });
+          res.end();
+          return;
+        }
+        res.writeHead(200, {
+          'content-type': 'text/javascript; charset=utf-8',
+          'content-length': Buffer.byteLength(STREAM_RELAY_CLIENT_SOURCE),
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        });
+        res.end(STREAM_RELAY_CLIENT_SOURCE);
+        return;
+      }
+
+      if (pathname.startsWith('/__mobile/stream-relay/')) {
+        const cancelId = relayCancelId(req);
+        if (!cancelId) {
+          res.writeHead(req.method === 'DELETE' ? 400 : 405, {
+            allow: 'DELETE',
+            'cache-control': 'no-store',
+          });
+          res.end();
+          return;
+        }
+        if (!relayManager.cancel(cancelId, device)) {
+          res.writeHead(404, { 'cache-control': 'no-store' });
+          res.end();
+          return;
+        }
+        res.writeHead(204, { 'cache-control': 'no-store' });
+        res.end();
+        return;
+      }
+
+      if (isRelayCandidateRequest(req)) {
+        await relayManager.handle(req, res, device);
+        return;
+      }
+      if (req.headers[RELAY_ID_HEADER] !== undefined || req.headers[RELAY_OFFSET_HEADER] !== undefined) {
+        res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+        res.end('Relay headers are not valid for this request\n');
+        return;
+      }
+
+      proxyHttp(targetUrl, req, res, { injectRelayClient: shouldInjectStreamRelayClient(req) });
     } catch (error) {
       console.error(`[st-mobile-gateway] ${req.method} ${req.url} failed: ${error.stack || error.message}`);
       if (!res.headersSent) {
@@ -316,6 +507,7 @@ export async function createGatewayServer(options) {
     hub,
     close: async () => {
       clearInterval(revokeTimer);
+      relayManager.close();
       if (hub) {
         await hub.close();
       }

@@ -1,8 +1,8 @@
 {
-  "versionCode": 7,
-  "versionName": "0.1.6",
-  "apkUrl": "https://raw.githubusercontent.com/SneakIrwin/SillyTavern-Mobile-apk/main/update/SillyTavern-Mobile-debug.apk",
-  "sha256": "6e82f083bcd8274cf3fa8850f4b8f50a9773416d7c9200d35d079cdfdecf4f93",
-  "packageName": "app.sillytavern.securemobile",
-  "releasedAt": "2026-07-17T09:05:26.5983105+00:00"
+    "versionCode":  8,
+    "versionName":  "0.1.7",
+    "apkUrl":  "https://raw.githubusercontent.com/SneakIrwin/SillyTavern-Mobile-apk/main/update/SillyTavern-Mobile-debug.apk",
+    "sha256":  "420bd068fb51908648344ec6becbfad8dcaf4fa79f05ae32a06786df485e4b68",
+    "packageName":  "app.sillytavern.securemobile",
+    "releasedAt":  "2026-07-17T10:07:34.7579465+00:00"
 }
