@@ -86,6 +86,26 @@ test('Android edge-to-edge content stays inside system bars, cutouts, and the IM
   assert.doesNotMatch(source, /setSystemUiVisibility\([^)]*LAYOUT_HIDE_NAVIGATION/);
 });
 
+test('paired WebView keeps streaming through app switches using scoped picture-in-picture', async () => {
+  const manifest = await text('android/app/src/main/AndroidManifest.xml');
+  const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
+
+  assert.match(manifest, /android:supportsPictureInPicture="true"/);
+  assert.match(manifest, /android:configChanges="[^"]*screenLayout[^"]*smallestScreenSize[^"]*"/);
+  assert.match(source, /setAutoEnterEnabled\(shouldKeepWebViewActive\(\)\)/);
+  assert.match(source, /setSeamlessResizeEnabled\(false\)/);
+  assert.match(source, /protected void onUserLeaveHint\(\)/);
+  assert.match(source, /Build\.VERSION\.SDK_INT < Build\.VERSION_CODES\.S/);
+  assert.match(source, /enterPictureInPictureMode\(buildPictureInPictureParams\(\)\)/);
+  assert.match(source, /onPageStarted[\s\S]*updatePictureInPictureParams\(\)/);
+  assert.match(source, /onPageFinished[\s\S]*updatePictureInPictureParams\(\)/);
+  assert.match(source, /webView\.getVisibility\(\) != View\.VISIBLE/);
+  assert.match(source, /webStatus\.getVisibility\(\) == View\.VISIBLE/);
+  assert.match(source, /savedOrigin\.equals\(originFor\(Uri\.parse\(currentUrl\)\)\)/);
+  assert.doesNotMatch(manifest, /SYSTEM_ALERT_WINDOW|WAKE_LOCK|FOREGROUND_SERVICE/);
+  assert.doesNotMatch(source, /addJavascriptInterface|PowerManager\.WakeLock|WifiManager\.WifiLock/);
+});
+
 test('launch updater is normal user-approved PackageInstaller flow only', async () => {
   const manifest = await text('android/app/src/main/AndroidManifest.xml');
   const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');

@@ -2,6 +2,7 @@ package app.sillytavern.securemobile;
 
 import android.app.Activity;
 import android.app.PendingIntent;
+import android.app.PictureInPictureParams;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
@@ -9,14 +10,17 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.util.Rational;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -94,6 +98,7 @@ public class MainActivity extends Activity {
         WebView.setWebContentsDebuggingEnabled(false);
         buildLayout();
         configureWebView();
+        configureBackgroundContinuity();
         boolean startedPairing = handleIntent(getIntent());
         checkForUpdateOnLaunch();
         String gatewayOrigin = getGatewayOrigin();
@@ -260,11 +265,13 @@ public class MainActivity extends Activity {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 hideWebStatus();
+                updatePictureInPictureParams();
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 commitPendingPairingIfReady(Uri.parse(url));
+                updatePictureInPictureParams();
             }
 
             @Override
@@ -312,6 +319,74 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    private void configureBackgroundContinuity() {
+        if (!supportsPictureInPicture()) {
+            return;
+        }
+        webView.addOnLayoutChangeListener((view, left, top, right, bottom,
+                                           oldLeft, oldTop, oldRight, oldBottom) ->
+                updatePictureInPictureParams());
+        updatePictureInPictureParams();
+    }
+
+    private boolean supportsPictureInPicture() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                && getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE);
+    }
+
+    private boolean shouldKeepWebViewActive() {
+        if (webView == null
+                || webView.getVisibility() != View.VISIBLE
+                || webStatus.getVisibility() == View.VISIBLE) {
+            return false;
+        }
+        String currentUrl = webView.getUrl();
+        String savedOrigin = getGatewayOrigin();
+        return currentUrl != null
+                && savedOrigin != null
+                && savedOrigin.equals(originFor(Uri.parse(currentUrl)));
+    }
+
+    private PictureInPictureParams buildPictureInPictureParams() {
+        PictureInPictureParams.Builder builder = new PictureInPictureParams.Builder()
+                .setAspectRatio(new Rational(9, 16));
+        Rect sourceRect = new Rect();
+        if (webView.getGlobalVisibleRect(sourceRect) && !sourceRect.isEmpty()) {
+            builder.setSourceRectHint(sourceRect);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setAutoEnterEnabled(shouldKeepWebViewActive());
+            builder.setSeamlessResizeEnabled(false);
+        }
+        return builder.build();
+    }
+
+    private void updatePictureInPictureParams() {
+        if (supportsPictureInPicture() && !isInPictureInPictureMode()) {
+            setPictureInPictureParams(buildPictureInPictureParams());
+        }
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        if (supportsPictureInPicture()
+                && Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+                && shouldKeepWebViewActive()
+                && !isInPictureInPictureMode()) {
+            enterPictureInPictureMode(buildPictureInPictureParams());
+        }
+    }
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode,
+                                              Configuration newConfig) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
+        if (!isInPictureInPictureMode) {
+            updatePictureInPictureParams();
+        }
     }
 
     private boolean handleIntent(Intent intent) {
@@ -469,12 +544,14 @@ public class MainActivity extends Activity {
         pairingPanel.setVisibility(View.VISIBLE);
         webView.setVisibility(View.GONE);
         forgetButton.setVisibility(View.GONE);
+        updatePictureInPictureParams();
     }
 
     private void showWebView() {
         pairingPanel.setVisibility(View.GONE);
         webView.setVisibility(View.VISIBLE);
         forgetButton.setVisibility(View.GONE);
+        updatePictureInPictureParams();
     }
 
     private void hideWebStatus() {
@@ -486,6 +563,7 @@ public class MainActivity extends Activity {
         webStatus.setVisibility(View.VISIBLE);
         showWebView();
         forgetButton.setVisibility(View.VISIBLE);
+        updatePictureInPictureParams();
     }
 
     private void openExternal(Uri uri) {
