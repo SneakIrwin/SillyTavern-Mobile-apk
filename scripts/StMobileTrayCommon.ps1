@@ -907,7 +907,7 @@ function Get-StMobileOwnedAuthHubUrlRecord {
         [System.IO.Path]::GetFullPath($Path), '')
     $bytes = $snapshot.Bytes
     try {
-        $record = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes) | ConvertFrom-Json
+        $record = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes))
     } catch {
         throw "Auth-hub URL record is not strict UTF-8 JSON; preserving foreign bytes: $($_.Exception.Message)"
     }
@@ -1066,7 +1066,7 @@ function Get-StMobileOwnedTrayStopRequest {
         [System.IO.Path]::GetFullPath($Path), '')
     $bytes = $snapshot.Bytes
     try {
-        $record = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes) | ConvertFrom-Json
+        $record = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes))
     } catch {
         throw "Tray stop request is not strict UTF-8 JSON; preserving foreign bytes: $($_.Exception.Message)"
     }
@@ -1298,6 +1298,18 @@ function Test-StMobileCanonicalGuid {
 function Test-StMobileJsonInteger {
     param([object]$Value)
     return $Value -is [int] -or $Value -is [long]
+}
+
+# Rank Audit For Canonical JSON Parsing
+# - Rank 4: security and ownership records preserve JSON strings as strings on every supported
+#   PowerShell runtime; automatic date coercion must never change validation semantics.
+function ConvertFrom-StMobileJsonStrict {
+    param([Parameter(Mandatory = $true)][string]$Json)
+    $convert = Get-Command ConvertFrom-Json -ErrorAction Stop
+    if ($convert.Parameters.ContainsKey('DateKind')) {
+        return ConvertFrom-Json -InputObject $Json -DateKind String
+    }
+    return ConvertFrom-Json -InputObject $Json
 }
 
 function Read-StMobileCanonicalPositivePidBytes {
@@ -1535,8 +1547,8 @@ function Get-VerifiedStMobileTrayProcess {
             $RecordSnapshot.Bytes,
             $RecordSnapshot.ParentToken,
             $RecordSnapshot.FileToken)
-        $record = (New-Object System.Text.UTF8Encoding($false, $true)).GetString(
-            $RecordSnapshot.Bytes) | ConvertFrom-Json
+        $record = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString(
+            $RecordSnapshot.Bytes))
     } catch {
         return Fail-Verification "Invalid tray process record $RecordPath`: $($_.Exception.Message)"
     }
@@ -1698,8 +1710,8 @@ function Get-VerifiedStMobileGatewayProcess {
             $RecordSnapshot.Bytes,
             $RecordSnapshot.ParentToken,
             $RecordSnapshot.FileToken)
-        $record = (New-Object System.Text.UTF8Encoding($false, $true)).GetString(
-            $RecordSnapshot.Bytes) | ConvertFrom-Json
+        $record = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString(
+            $RecordSnapshot.Bytes))
     } catch {
         return Fail-GatewayVerification "Invalid gateway process record $RecordPath`: $($_.Exception.Message)"
     }
@@ -1982,7 +1994,7 @@ function Write-StMobileSillyTavernRecord {
             '',
             '')
         try {
-            $existing = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($existingBytes) | ConvertFrom-Json
+            $existing = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString($existingBytes))
         } catch {
             throw "Existing SillyTavern ownership record is invalid; refusing overwrite: $($_.Exception.Message)"
         }
@@ -2127,8 +2139,8 @@ function Get-SillyTavernSession {
             $RecordSnapshot.Bytes,
             $RecordSnapshot.ParentToken,
             $RecordSnapshot.FileToken)
-        $record = (New-Object System.Text.UTF8Encoding($false, $true)).GetString(
-            $RecordSnapshot.Bytes) | ConvertFrom-Json
+        $record = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString(
+            $RecordSnapshot.Bytes))
     } catch {
         return Fail-SillyTavernVerification "Invalid SillyTavern ownership record $RecordPath`: $($_.Exception.Message)"
     }

@@ -284,6 +284,7 @@ export async function createGatewayServer(options) {
   const relayManager = createStreamRelayManager({
     targetUrl,
     limits: options.relayLimits,
+    onEvent: options.onRelayEvent,
     buildUpstreamHeaders: (req, bodyLength) => ({
       ...proxyHeaders(req, { forceIdentityEncoding: true }),
       'content-length': String(bodyLength),

@@ -30,7 +30,7 @@ async function pairedSession(store, label = 'relay test') {
   return { ...session, cookie: `stmg=${session.token}` };
 }
 
-async function startGateway(target, relayLimits = {}) {
+async function startGateway(target, relayLimits = {}, onRelayEvent = null) {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'st-mobile-stream-relay-'));
   const store = createStateStore({ stateDir });
   const gateway = await createGatewayServer({
@@ -40,6 +40,7 @@ async function startGateway(target, relayLimits = {}) {
     listenHost: '127.0.0.1',
     listenPort: 0,
     relayLimits,
+    onRelayEvent,
   });
   const address = gateway.server.address();
   return {
@@ -228,6 +229,52 @@ test('relay keeps one upstream generation alive and replays exact SSE bytes from
   }
 });
 
+test('detaching before upstream headers does not write to a dead response and remains replayable', async () => {
+  const upstream = await startControlledStreamServer();
+  const events = [];
+  const gateway = await startGateway(upstream.target, {}, (event) => events.push(event));
+  try {
+    const session = await pairedSession(gateway.store);
+    const id = crypto.randomUUID();
+    const body = JSON.stringify({ stream: true, prompt: 'sleep before headers' });
+    let abandonedRequest;
+    const abandoned = new Promise((resolve, reject) => {
+      abandonedRequest = http.request(`${gateway.url}/api/backends/chat-completions/generate`, {
+      method: 'POST',
+      headers: { ...relayHeaders(id, 0), cookie: session.cookie },
+      }, (response) => {
+        response.resume();
+        response.once('end', () => reject(new Error('Abandoned transport unexpectedly completed')));
+      });
+      abandonedRequest.once('error', resolve);
+      abandonedRequest.end(body);
+    });
+    const controlled = await upstream.nextRequest();
+    abandonedRequest.destroy(new Error('phone slept'));
+    await abandoned;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const bytes = Buffer.from('data: {"token":"awake"}\n\ndata: [DONE]\n\n');
+    controlled.res.end(bytes);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const resumed = await fetch(`${gateway.url}/api/backends/chat-completions/generate`, {
+      method: 'POST',
+      headers: { ...relayHeaders(id, 0), cookie: session.cookie },
+      body,
+    });
+    assert.equal(resumed.status, 200);
+    assert.deepEqual(Buffer.from(await resumed.arrayBuffer()), bytes);
+    assert.equal(upstream.requests.length, 1);
+    assert.ok(events.some((event) => event.type === 'attachment-dropped'
+      && event.reason === 'client-transport-closed-before-headers'));
+    assert.ok(events.some((event) => event.type === 'attached' && event.offset === 0));
+  } finally {
+    await gateway.close();
+    await upstream.close();
+  }
+});
+
 test('relay refuses encoded upstream streams rather than replaying corrupt bytes', async () => {
   const upstream = http.createServer((req, res) => {
     req.resume();
@@ -408,6 +455,7 @@ test('revoking a device aborts its detached upstream relay with zero subscribers
 
 test('relay client shim is narrowly scoped and retries with byte offsets without forbidden encoding headers', async () => {
   const source = await readFile(new URL('../public/stream-relay-client.js', import.meta.url), 'utf8');
+  const serverSource = await readFile(new URL('../src/stream-relay.js', import.meta.url), 'utf8');
   assert.match(source, /url\.search !== ''/);
   assert.match(source, /parsed\?\.stream === true/);
   assert.match(source, /parsed\?\.streaming === true/);
@@ -418,9 +466,18 @@ test('relay client shim is narrowly scoped and retries with byte offsets without
   assert.match(source, /while \(true\)/);
   assert.match(source, /relayRetryLifetimeMs = 80 \* 60_000/);
   assert.match(source, /relayRetryDeadline = relayStartedAt \+ relayRetryLifetimeMs/);
-  assert.match(source, /activeTransport\?\.abort\(retryLifetimeError\(\)\)/);
   assert.match(source, /Math\.max\(0, relayRetryDeadline - Date\.now\(\)\)/);
   assert.match(source, /retryLifetimeExpired\(\)/);
-  assert.match(source, /window\.addEventListener\('online', resumePendingAborts\)/);
+  assert.match(source, /activeRelaySessions/);
+  assert.match(source, /stMobileHostPause/);
+  assert.match(source, /stMobileHostResume/);
+  assert.match(source, /window\.addEventListener\('online'/);
+  assert.match(source, /window\.addEventListener\('pageshow'/);
+  assert.match(source, /window\.addEventListener\('focus'/);
+  assert.match(source, /visibleStallWatchdogMs/);
+  assert.match(source, /activeTransport\?\.abort\(lifecycleTransportError\(reason\)\)/);
   assert.doesNotMatch(source, /headers\.set\(['"]accept-encoding/i);
+  assert.match(serverSource, /completedTtlMs: 90 \* 60_000/);
+  assert.match(serverSource, /maxActiveMs: 90 \* 60_000/);
+  assert.match(serverSource, /cancelTombstoneTtlMs: 100 \* 60_000/);
 });

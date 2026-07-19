@@ -67,8 +67,8 @@ function Stop-VerifiedGateway {
     $staleRecordBytes = $gatewayRecordSnapshot.Bytes
     $pidValue = Read-StMobileCanonicalPositivePidBytes $stalePidBytes 'ST Mobile Gateway'
     try {
-        $capturedGatewayRecord = (New-Object System.Text.UTF8Encoding($false, $true)).GetString(
-            $staleRecordBytes) | ConvertFrom-Json
+        $capturedGatewayRecord = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString(
+            $staleRecordBytes))
     } catch {
         throw "Gateway ownership record is invalid; refusing to stop or clean up: $($_.Exception.Message)"
     }

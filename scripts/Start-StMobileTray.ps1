@@ -452,7 +452,7 @@ function Write-TrayStateRecordCas {
         '',
         '')
     try {
-        $oldRecord = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($oldBytes) | ConvertFrom-Json
+        $oldRecord = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString($oldBytes))
     } catch {
         throw "$OwnershipName is invalid; refusing replacement: $($_.Exception.Message)"
     }
@@ -578,7 +578,7 @@ function Get-RetryStateRecord {
         return $null
     }
     try {
-        $record = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes) | ConvertFrom-Json
+        $record = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes))
         if (-not (Test-StMobileGatewayRetryStateRecord $record $MaxAutoStartAttempts)) {
             throw 'record schema, session key, attempt count, or exhaustion flag is invalid'
         }
@@ -609,7 +609,7 @@ function Remove-RetryStateRecord {
         return
     }
     try {
-        $record = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes) | ConvertFrom-Json
+        $record = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes))
     } catch {
         $record = $null
     }
@@ -673,7 +673,7 @@ function Get-SuppressionRecord {
         return $null
     }
     try {
-        $record = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes) | ConvertFrom-Json
+        $record = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes))
         if (-not (Test-StMobileGatewaySuppressionStateRecord $record)) {
             throw 'record schema or session key is invalid'
         }
@@ -704,7 +704,7 @@ function Remove-SuppressionRecord {
         return
     }
     try {
-        $record = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes) | ConvertFrom-Json
+        $record = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes))
     } catch {
         $record = $null
     }
@@ -880,7 +880,7 @@ function Read-TrayProbeResultSnapshot([string]$Path, [string]$ExpectedProbeId) {
         [System.IO.Path]::GetFullPath($Path), '')
     $bytes = $fileSnapshot.Bytes
     try {
-        $result = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes) | ConvertFrom-Json
+        $result = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes))
     } catch {
         throw "probe result is not strict UTF-8 JSON: $($_.Exception.Message)"
     }
@@ -1010,7 +1010,7 @@ function New-ForceResetStateTransaction {
         } elseif (Test-Path -LiteralPath $candidate.Path) {
             $snapshot = [StMobile.PinnedFileOperations]::ReadSnapshot($candidate.Path, '')
             $record = $null
-            try { $record = (New-Object System.Text.UTF8Encoding($false,$true)).GetString($snapshot.Bytes) | ConvertFrom-Json } catch {}
+            try { $record = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false,$true)).GetString($snapshot.Bytes)) } catch {}
             $valid = if ($candidate.Kind -eq 'Retry') { Test-StMobileGatewayRetryStateRecord $record $MaxAutoStartAttempts } else { Test-StMobileGatewaySuppressionStateRecord $record }
             if (-not $valid) { throw "Unclassified invalid $($candidate.Kind) record appeared during force reset; refusing transaction." }
             $entries.Add([pscustomobject]@{ Kind=$candidate.Kind; Path=$candidate.Path; Bytes=$snapshot.Bytes; ParentToken=$snapshot.ParentToken; FileToken=$snapshot.FileToken; Conflict=$false })

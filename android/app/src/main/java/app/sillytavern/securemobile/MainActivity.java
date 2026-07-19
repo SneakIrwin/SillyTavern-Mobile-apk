@@ -26,6 +26,7 @@ import android.webkit.SslErrorHandler;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.CookieManager;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -72,6 +73,10 @@ public class MainActivity extends Activity {
     private static final int UPDATE_READ_TIMEOUT_MS = 30000;
     private static final int UPDATE_MANIFEST_MAX_BYTES = 65536;
     private static final long UPDATE_APK_MAX_BYTES = 200L * 1024L * 1024L;
+    private static final String HOST_PAUSE_SCRIPT =
+            "window.dispatchEvent(new Event('stMobileHostPause'));";
+    private static final String HOST_RESUME_SCRIPT =
+            "window.dispatchEvent(new Event('stMobileHostResume'));";
 
     private SharedPreferences preferences;
     private LinearLayout root;
@@ -113,6 +118,44 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         handleIntent(intent);
+    }
+
+    @Override
+    protected void onPause() {
+        dispatchHostLifecycleEvent(HOST_PAUSE_SCRIPT);
+        if (webView != null) {
+            webView.onPause();
+        }
+        super.onPause();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (webView != null) {
+            webView.onResume();
+        }
+        dispatchHostLifecycleEvent(HOST_RESUME_SCRIPT);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            dispatchHostLifecycleEvent(HOST_RESUME_SCRIPT);
+        }
+    }
+
+    private void dispatchHostLifecycleEvent(String script) {
+        WebView currentWebView = webView;
+        if (currentWebView == null || currentWebView.getUrl() == null) {
+            return;
+        }
+        try {
+            currentWebView.evaluateJavascript(script, null);
+        } catch (IllegalStateException ignored) {
+            // A renderer-loss callback will replace a dead WebView.
+        }
     }
 
     private void buildLayout() {
@@ -163,11 +206,7 @@ public class MainActivity extends Activity {
         webStatus.setBackgroundColor(Color.rgb(74, 24, 28));
         webStatus.setVisibility(View.GONE);
 
-        webView = new WebView(this);
-        webView.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f));
+        webView = createWebView();
 
         forgetButton = new Button(this);
         forgetButton.setText(getString(R.string.forget_button));
@@ -190,6 +229,15 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(root);
         configureWindowInsets();
+    }
+
+    private WebView createWebView() {
+        WebView view = new WebView(this);
+        view.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f));
+        return view;
     }
 
     private void configureWindowInsets() {
@@ -290,6 +338,11 @@ public class MainActivity extends Activity {
                     showGatewayLoadFailed();
                 }
             }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                return recoverFromRenderProcessLoss(view);
+            }
         });
 
         webView.setWebChromeClient(new WebChromeClient() {
@@ -312,6 +365,35 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    private boolean recoverFromRenderProcessLoss(WebView failedView) {
+        if (failedView == null || failedView != webView || root == null) {
+            return false;
+        }
+        String interruptedUrl = failedView.getUrl();
+        int childIndex = root.indexOfChild(failedView);
+        root.removeView(failedView);
+        failedView.destroy();
+
+        webView = createWebView();
+        root.addView(webView, childIndex >= 0 ? childIndex : Math.max(0, root.getChildCount() - 1));
+        configureWebView();
+
+        if (interruptedUrl != null && isAllowedGatewayUri(Uri.parse(interruptedUrl))) {
+            showWebView();
+            webView.loadUrl(interruptedUrl);
+            return true;
+        }
+        String gatewayOrigin = getGatewayOrigin();
+        if (gatewayOrigin != null) {
+            showWebView();
+            webView.loadUrl(gatewayOrigin + "/");
+        } else {
+            clearPendingPairing();
+            showPairingPanel();
+        }
+        return true;
     }
 
     private boolean handleIntent(Intent intent) {

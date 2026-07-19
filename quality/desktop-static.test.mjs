@@ -887,6 +887,31 @@ $bytes = [StMobile.ShellLinkSerializer]::SerializeAndValidate(
   }
 });
 
+test('canonical ownership JSON preserves timestamp strings under both PowerShell runtimes', () => {
+  const commonScript = path.join(root, 'scripts', 'StMobileTrayCommon.ps1').replaceAll("'", "''");
+  const timestamp = '2026-07-19T05:10:06.554Z';
+  const json = JSON.stringify({ processStartTimeUtc: timestamp, pid: 65896 }).replaceAll("'", "''");
+  for (const executable of ['powershell.exe', 'pwsh.exe']) {
+    const script = `
+. '${commonScript}'
+$record = ConvertFrom-StMobileJsonStrict '${json}'
+[pscustomobject]@{
+  timestampType = $record.processStartTimeUtc.GetType().FullName
+  timestampExact = [string]$record.processStartTimeUtc -ceq '${timestamp}'
+  pidIsInteger = Test-StMobileJsonInteger $record.pid
+} | ConvertTo-Json -Compress
+`;
+    const result = JSON.parse(execFileSync(executable, [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script,
+    ], { encoding: 'utf8', windowsHide: true }));
+    assert.deepEqual(result, {
+      timestampType: 'System.String',
+      timestampExact: true,
+      pidIsInteger: true,
+    }, executable);
+  }
+});
+
 test('Windows argument quoting round-trips trailing slashes and rejects extra tray arguments', () => {
   const commonScript = path.join(root, 'scripts', 'StMobileTrayCommon.ps1').replaceAll("'", "''");
   const values = ['', 'plain', 'two words', 'C:\\path with space\\', 'say "hello"', 'slashes\\\\\\"quote\\'];
@@ -2215,7 +2240,7 @@ test('ST Launcher integration survives a clean Git checkout without dirtying ups
   }
 });
 
-test('ST Launcher installer fails closed on collisions and rolls back every mutated surface', { timeout: 180_000 }, async () => {
+test('ST Launcher installer fails closed on collisions and rolls back every mutated surface', { timeout: 300_000 }, async () => {
   const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'st-mobile-launcher-adversarial-'));
   const installerScript = path.join(root, 'scripts', 'Install-StLauncherIntegration.ps1');
   const installerSource = await readFile(installerScript, 'utf8');

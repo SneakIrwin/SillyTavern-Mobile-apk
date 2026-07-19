@@ -50,13 +50,14 @@ async function waitFor(predicate, timeoutMs, message) {
   throw new Error(message);
 }
 
-const chunks = Array.from({ length: 120 }, (_, index) => (
+const chunks = Array.from({ length: 300 }, (_, index) => (
   Buffer.from(`data: {"index":${index},"token":"αβ${index}"}\n\n`, 'utf8')
 ));
 chunks.push(Buffer.from('data: [DONE]\n\n', 'utf8'));
 const expected = Buffer.concat(chunks);
 
 let generationHits = 0;
+const relayEvents = [];
 let resolveResult;
 let rejectResult;
 const resultPromise = new Promise((resolve, reject) => {
@@ -168,6 +169,7 @@ try {
     certificates,
     listenHost: '0.0.0.0',
     listenPort: gatewayPort,
+    onRelayEvent: (event) => relayEvents.push(event),
   });
   const issued = await createPairingNonce(store, { ttlMs: 60_000, label: 'Headless background test' });
   const pairingUrl = `https://${gatewayHost}:${gatewayPort}/__mobile/pair/${issued.nonce}`;
@@ -176,37 +178,76 @@ try {
   adb('shell', 'pm', 'clear', packageName);
   adb('shell', 'am', 'start', '-W', '-a', 'android.intent.action.VIEW', '-d', deepLink);
   await waitFor(() => generationHits === 1, 15_000, 'The Android WebView never started the relayed generation');
+  await waitFor(() => relayEvents.some((event) => event.type === 'attached'), 5_000,
+    'The Android WebView never attached to its server-owned relay');
+  await delay(1_000);
+  const androidPidBeforeLock = adb('shell', 'pidof', packageName);
+  assert.match(androidPidBeforeLock, /^\d+$/, 'Android app PID was unavailable before lock');
 
-  adb('shell', 'input', 'keyevent', 'KEYCODE_HOME');
-  const backgroundedAt = Date.now();
-  await delay(2_000);
-  gateway.server.closeAllConnections();
-  await delay(15_000);
-  const backgroundDurationMs = Date.now() - backgroundedAt;
+  adb('shell', 'input', 'keyevent', 'KEYCODE_SLEEP');
+  await waitFor(() => /Wakefulness=Asleep/.test(adb('shell', 'dumpsys', 'power')), 5_000,
+    'The emulator did not enter the screen-off sleep state');
+  const lockedAt = Date.now();
+  await delay(10_000);
+  const lockDurationMs = Date.now() - lockedAt;
 
-  adb('shell', 'am', 'start', '-W', '-n', activityName);
-  const result = await Promise.race([
-    resultPromise,
-    delay(30_000).then(() => { throw new Error('The WebView did not finish after returning from the background'); }),
-  ]);
+  adb('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP');
+  adb('shell', 'wm', 'dismiss-keyguard');
+  await waitFor(() => /Wakefulness=Awake/.test(adb('shell', 'dumpsys', 'power')), 5_000,
+    'The emulator did not wake');
+  await waitFor(() => adb('shell', 'dumpsys', 'activity', 'activities').includes(activityName), 10_000,
+    'The existing Android activity did not return after keyguard dismissal');
+  const androidPidAfterUnlock = adb('shell', 'pidof', packageName);
+  assert.equal(androidPidAfterUnlock, androidPidBeforeLock, 'Android process was recreated during lock recovery');
+  let resultTimeout;
+  const resultTimeoutPromise = new Promise((_, reject) => {
+    resultTimeout = setTimeout(
+      () => reject(new Error('The WebView did not finish after screen unlock')),
+      45_000,
+    );
+  });
+  let result;
+  try {
+    result = await Promise.race([resultPromise, resultTimeoutPromise]);
+  } finally {
+    clearTimeout(resultTimeout);
+  }
   assert.equal(result.ok, true, result.error ?? 'WebView stream failed');
   assert.deepEqual(Buffer.from(result.base64, 'base64'), expected);
   assert.equal(generationHits, 1, 'Reconnect started a duplicate upstream generation');
-  assert.ok(backgroundDurationMs >= 15_000, `App was backgrounded for only ${backgroundDurationMs} ms`);
+  assert.ok(lockDurationMs >= 10_000, `Phone was locked for only ${lockDurationMs} ms`);
+  const attachments = relayEvents.filter((event) => event.type === 'attached');
+  assert.ok(attachments.length >= 2, 'Unlock did not create a fresh mobile relay attachment');
+  assert.equal(new Set(attachments.map((event) => event.relayId)).size, 1,
+    'Unlock changed relay identity and risked a duplicate generation');
+  assert.equal(attachments[0].offset, 0);
+  assert.ok(attachments.slice(1).some((event) => event.offset > 0),
+    'Unlock did not resume from a positive consumed-byte offset');
+  assert.equal(relayEvents.some((event) => event.type === 'canceled'), false,
+    'Phone lifecycle recovery canceled the desktop-owned generation');
 
   const packageDump = adb('shell', 'dumpsys', 'package', packageName);
   assert.doesNotMatch(packageDump, /supportsPictureInPicture=true/);
   console.log(JSON.stringify({
     ok: true,
     version: packageDump.match(/versionName=([^\s]+)/)?.[1] ?? null,
-    backgroundDurationMs,
-    forcedMobileConnectionDrop: true,
+    lockDurationMs,
+    androidPidPreserved: true,
+    forcedMobileConnectionDrop: false,
     upstreamGenerationHits: generationHits,
+    relayAttachmentOffsets: attachments.map((event) => event.offset),
     exactBytes: expected.length,
     completionVisibility: result.visibility,
   }, null, 2));
 } finally {
-  if (gateway) await gateway.close();
+  if (gateway) {
+    gateway.server.closeAllConnections();
+    await gateway.close();
+  }
+  upstream.closeAllConnections();
   await close(upstream).catch(() => {});
-  if (stateDir) await rm(stateDir, { recursive: true, force: true });
+  if (stateDir) {
+    await delay(500);
+    await rm(stateDir, { recursive: true, force: true });
+  }
 }

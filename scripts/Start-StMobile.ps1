@@ -498,7 +498,7 @@ function Clear-StaleGatewayOwnershipForLaunch {
     $stalePidBytes = $stalePidSnapshot.Bytes
     $staleRecordBytes = $staleRecordSnapshot.Bytes
     try {
-        $record = Get-Content -LiteralPath $GatewayProcessRecord -Raw | ConvertFrom-Json
+        $record = ConvertFrom-StMobileJsonStrict (Get-Content -LiteralPath $GatewayProcessRecord -Raw)
     } catch {
         throw "Gateway ownership record is invalid; refusing overwrite: $($_.Exception.Message)"
     }
@@ -553,7 +553,7 @@ function Clear-StaleSillyTavernOwnershipForLaunch {
     $recordBytes = $recordSnapshot.Bytes
     $pidValue = Read-StMobileCanonicalPositivePidBytes $pidBytes 'SillyTavern'
     try {
-        $record = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($recordBytes) | ConvertFrom-Json
+        $record = ConvertFrom-StMobileJsonStrict ((New-Object System.Text.UTF8Encoding($false, $true)).GetString($recordBytes))
     } catch {
         throw "SillyTavern ownership record is invalid; refusing overwrite: $($_.Exception.Message)"
     }

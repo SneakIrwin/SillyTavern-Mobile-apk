@@ -14,10 +14,10 @@ const DEFAULT_LIMITS = Object.freeze({
   maxActiveRelays: 8,
   maxRelaysPerOwner: 2,
   maxSubscriberQueueBytes: 256 * 1024,
-  completedTtlMs: 30 * 60_000,
-  failedTtlMs: 5 * 60_000,
-  maxActiveMs: 60 * 60_000,
-  cancelTombstoneTtlMs: 90 * 60_000,
+  completedTtlMs: 90 * 60_000,
+  failedTtlMs: 10 * 60_000,
+  maxActiveMs: 90 * 60_000,
+  cancelTombstoneTtlMs: 100 * 60_000,
   maxCancelTombstones: 2_048,
 });
 
@@ -177,10 +177,29 @@ export function relayCancelId(req) {
 export function createStreamRelayManager(options) {
   const targetUrl = options.targetUrl instanceof URL ? options.targetUrl : new URL(options.targetUrl);
   const buildUpstreamHeaders = options.buildUpstreamHeaders;
+  const onEvent = typeof options.onEvent === 'function' ? options.onEvent : null;
   const limits = { ...DEFAULT_LIMITS, ...(options.limits ?? {}) };
   const relays = new Map();
   const cancelTombstones = new Map();
   let totalBytes = 0;
+
+  function emit(type, relay, details = {}) {
+    if (!onEvent) {
+      return;
+    }
+    try {
+      onEvent({
+        type,
+        at: new Date().toISOString(),
+        relayId: relay?.id ?? details.relayId ?? null,
+        state: relay?.state ?? details.state ?? null,
+        bufferedBytes: relay?.length ?? 0,
+        ...details,
+      });
+    } catch {
+      // Observability must never change relay behavior.
+    }
+  }
 
   function recordTombstone(id, ownerTokenHash) {
     if (cancelTombstones.size >= limits.maxCancelTombstones) {
@@ -196,12 +215,13 @@ export function createStreamRelayManager(options) {
     });
   }
 
-  function removeRelay(relay, { preserveId = true } = {}) {
+  function removeRelay(relay, { preserveId = true, reason = 'removed' } = {}) {
     if (relays.get(relay.id) !== relay) {
       return;
     }
     relays.delete(relay.id);
     totalBytes -= relay.length;
+    emit('removed', relay, { reason });
     if (preserveId) {
       recordTombstone(relay.id, relay.ownerTokenHash);
     }
@@ -229,6 +249,9 @@ export function createStreamRelayManager(options) {
     relay.resolveHeaders?.();
     relay.resolveHeaders = null;
     endSubscribers(relay, state !== 'complete');
+    emit('terminal', relay, {
+      reason: state === 'complete' ? 'upstream-complete' : 'upstream-ended-with-error',
+    });
   }
 
   function cancelRelay(relay, reason = 'Relay canceled') {
@@ -237,7 +260,8 @@ export function createStreamRelayManager(options) {
       relay.upstreamResponse?.destroy(new Error(reason));
       finishRelay(relay, 'canceled', new Error(reason));
     }
-    removeRelay(relay);
+    emit('canceled', relay, { reason });
+    removeRelay(relay, { reason: 'canceled' });
   }
 
   function evictOldestTerminalRelay() {
@@ -247,7 +271,8 @@ export function createStreamRelayManager(options) {
     if (!relay) {
       return false;
     }
-    removeRelay(relay);
+    emit('capacity-evicted', relay, { reason: 'terminal-replay-buffer-capacity' });
+    removeRelay(relay, { reason: 'capacity-evicted' });
     return true;
   }
 
@@ -256,7 +281,8 @@ export function createStreamRelayManager(options) {
       if (['pending', 'streaming'].includes(relay.state) && now - relay.createdAt > limits.maxActiveMs) {
         cancelRelay(relay, 'Relay exceeded the maximum active duration');
       } else if (!['pending', 'streaming'].includes(relay.state) && relay.expiresAt <= now) {
-        removeRelay(relay);
+        emit('expired', relay, { reason: 'retention-horizon-ended' });
+        removeRelay(relay, { reason: 'expired' });
       }
     }
     for (const [id, tombstone] of cancelTombstones) {
@@ -323,6 +349,7 @@ export function createStreamRelayManager(options) {
       relay.statusMessage = upstreamRes.statusMessage;
       relay.headers = responseHeaders(upstreamRes.headers, relay.id, 'streaming');
       relay.state = 'streaming';
+      emit('upstream-response', relay, { statusCode: relay.statusCode });
       relay.resolveHeaders?.();
       relay.resolveHeaders = null;
       upstreamRes.on('data', (chunk) => appendChunk(relay, chunk));
@@ -370,11 +397,16 @@ export function createStreamRelayManager(options) {
       upstreamResponse: null,
     };
     relays.set(id, relay);
+    emit('created', relay);
     startUpstream(relay, req, body);
     return relay;
   }
 
   function attach(relay, res, offset) {
+    if (res.destroyed || res.closed || res.writableEnded || !res.socket || res.socket.destroyed) {
+      emit('attachment-dropped', relay, { offset, reason: 'client-transport-closed-before-headers' });
+      return;
+    }
     if (offset > relay.length) {
       sendText(res, 416, 'Relay offset is beyond the buffered response');
       return;
@@ -392,6 +424,7 @@ export function createStreamRelayManager(options) {
       'x-st-mobile-relay-state': relay.state,
     });
     const subscriber = { res, offset };
+    emit('attached', relay, { offset });
     for (const chunk of relay.chunks) {
       const end = chunk.start + chunk.data.length;
       if (end <= subscriber.offset) {
@@ -412,7 +445,10 @@ export function createStreamRelayManager(options) {
       return;
     }
     relay.subscribers.add(subscriber);
-    res.once('close', () => relay.subscribers.delete(subscriber));
+    res.once('close', () => {
+      relay.subscribers.delete(subscriber);
+      emit('detached', relay, { offset: subscriber.offset, reason: 'client-transport-closed' });
+    });
   }
 
   async function handle(req, res, device) {

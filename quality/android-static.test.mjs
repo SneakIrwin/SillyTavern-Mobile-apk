@@ -94,6 +94,35 @@ test('background stream continuity requires no visible PiP, overlay, wake lock, 
   assert.doesNotMatch(source, /PictureInPicture|enterPictureInPictureMode|onUserLeaveHint|addJavascriptInterface|PowerManager\.WakeLock|WifiManager\.WifiLock/);
 });
 
+test('phone lock lifecycle detaches and resumes the mobile relay without reloading the page', async () => {
+  const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
+  const onPause = source.match(/protected void onPause\(\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  const onResume = source.match(/protected void onResume\(\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  const onFocus = source.match(/public void onWindowFocusChanged\(boolean hasFocus\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+
+  assert.match(source, /stMobileHostPause/);
+  assert.match(source, /stMobileHostResume/);
+  assert.match(onPause, /dispatchHostLifecycleEvent\(HOST_PAUSE_SCRIPT\)/);
+  assert.match(onPause, /webView\.onPause\(\)/);
+  assert.match(onResume, /webView\.onResume\(\)/);
+  assert.match(onResume, /dispatchHostLifecycleEvent\(HOST_RESUME_SCRIPT\)/);
+  assert.match(onFocus, /if \(hasFocus\)/);
+  assert.match(onFocus, /dispatchHostLifecycleEvent\(HOST_RESUME_SCRIPT\)/);
+  assert.match(source, /evaluateJavascript\(script, null\)/);
+  assert.doesNotMatch(source, /pauseTimers\(|resumeTimers\(/);
+  assert.doesNotMatch(onResume, /loadUrl\(|reload\(/);
+});
+
+test('a killed WebView renderer is replaced instead of reusing the dead instance', async () => {
+  const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
+  assert.match(source, /onRenderProcessGone\(WebView view, RenderProcessGoneDetail detail\)/);
+  assert.match(source, /recoverFromRenderProcessLoss\(view\)/);
+  assert.match(source, /root\.removeView\(failedView\)/);
+  assert.match(source, /failedView\.destroy\(\)/);
+  assert.match(source, /webView = createWebView\(\)/);
+  assert.match(source, /configureWebView\(\)/);
+});
+
 test('launch updater is normal user-approved PackageInstaller flow only', async () => {
   const manifest = await text('android/app/src/main/AndroidManifest.xml');
   const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');

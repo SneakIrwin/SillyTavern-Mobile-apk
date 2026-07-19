@@ -76,6 +76,7 @@ async function commandServe(args) {
     listenPort: config.port,
     publicHost: config.publicHost,
     hubPort,
+    onRelayEvent: (event) => console.log(`[st-mobile-relay] ${JSON.stringify(event)}`),
   });
 
   console.log(`ST Mobile Gateway listening at https://${config.publicHost}:${config.port}`);
