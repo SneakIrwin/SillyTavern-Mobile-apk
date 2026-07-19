@@ -1190,11 +1190,30 @@ function Stop-GatewayFromTray {
     [void](Start-HiddenIdlePowerShell $StopScript @() 'stop_gateway')
 }
 
+function Open-VerifiedSillyTavernDesktop {
+    param(
+        [int]$Port,
+        [string]$Root,
+        [string]$RecordPath
+    )
+    $verifiedSession = Get-SillyTavernSession `
+        -Port $Port `
+        -SillyTavernRoot $Root `
+        -RecordPath $RecordPath `
+        -ThrowOnInvalid
+    if (-not $verifiedSession) {
+        throw 'No live root-verified SillyTavern desktop session is available.'
+    }
+    [void](Start-Process -FilePath "http://127.0.0.1:$Port/")
+}
+
 $context = New-Object System.Windows.Forms.ApplicationContext
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $statusItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $statusItem.Text = 'Status: starting'
 $statusItem.Enabled = $false
+$openSillyTavernItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$openSillyTavernItem.Text = 'Open SillyTavern on Desktop'
 $openHubItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $openHubItem.Text = 'Open Authentication Hub'
 $startGatewayItem = New-Object System.Windows.Forms.ToolStripMenuItem
@@ -1209,6 +1228,7 @@ $exitItem.Text = 'Exit Tray (leave gateway running)'
 
 [void]$menu.Items.Add($statusItem)
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$menu.Items.Add($openSillyTavernItem)
 [void]$menu.Items.Add($openHubItem)
 [void]$menu.Items.Add($startGatewayItem)
 [void]$menu.Items.Add($stopGatewayItem)
@@ -1230,6 +1250,22 @@ $notifyIcon.ContextMenuStrip = $menu
 $notifyIcon.Text = 'ST Mobile Hub: starting'
 $notifyIcon.Visible = $true
 
+$openSillyTavernItem.add_Click({
+    try {
+        Open-VerifiedSillyTavernDesktop `
+            -Port $SillyTavernPort `
+            -Root $SillyTavernRoot `
+            -RecordPath $SillyTavernProcessRecord
+        Write-TrayLog "SILLYTAVERN_DESKTOP_OPENED url=http://127.0.0.1:$SillyTavernPort/ verified=true"
+    } catch {
+        Write-TrayLog "SILLYTAVERN_DESKTOP_OPEN_BLOCKED error=$($_.Exception.Message)"
+        $notifyIcon.ShowBalloonTip(
+            5000,
+            'SillyTavern is not ready',
+            'The verified desktop SillyTavern session is unavailable.',
+            [System.Windows.Forms.ToolTipIcon]::Warning)
+    }
+})
 $openHubAction = {
     if ($script:LastHubReady) {
         Start-Process "http://127.0.0.1:$HubPort/"
@@ -1302,42 +1338,49 @@ function Update-TrayState {
         $statusItem.Text = 'Status: gateway and auth hub online'
         $notifyIcon.Text = 'ST Mobile Hub: online'
         $openHubItem.Enabled = $true
+        $openSillyTavernItem.Enabled = $stReady
         $startGatewayItem.Enabled = $false
         $stopGatewayItem.Enabled = $true
     } elseif ($script:StartAttempt -and -not $script:StartAttempt.HasExited) {
         $statusItem.Text = 'Status: starting gateway'
         $notifyIcon.Text = 'ST Mobile Hub: starting gateway'
         $openHubItem.Enabled = $false
+        $openSillyTavernItem.Enabled = $stReady
         $startGatewayItem.Enabled = $false
         $stopGatewayItem.Enabled = $false
     } elseif ($script:StateRecordConflict -and $stReady) {
         $statusItem.Text = 'Status: state conflict; manual start will quarantine and rearm'
         $notifyIcon.Text = 'ST Mobile Hub: manual repair needed'
         $openHubItem.Enabled = $false
+        $openSillyTavernItem.Enabled = $stReady
         $startGatewayItem.Enabled = $true
         $stopGatewayItem.Enabled = $false
     } elseif ($script:AutoStartSuppressed -and $stReady) {
         $statusItem.Text = 'Status: gateway stopped for this ST session'
         $notifyIcon.Text = 'ST Mobile Hub: paused'
         $openHubItem.Enabled = $false
+        $openSillyTavernItem.Enabled = $stReady
         $startGatewayItem.Enabled = $true
         $stopGatewayItem.Enabled = $false
     } elseif ($script:AutoRetryExhausted -and $stReady) {
         $statusItem.Text = 'Status: automatic retries exhausted; manual start available'
         $notifyIcon.Text = 'ST Mobile Hub: manual retry needed'
         $openHubItem.Enabled = $false
+        $openSillyTavernItem.Enabled = $stReady
         $startGatewayItem.Enabled = $true
         $stopGatewayItem.Enabled = $false
     } elseif ($stReady) {
         $statusItem.Text = 'Status: SillyTavern ready; gateway pending'
         $notifyIcon.Text = 'ST Mobile Hub: gateway pending'
         $openHubItem.Enabled = $false
+        $openSillyTavernItem.Enabled = $stReady
         $startGatewayItem.Enabled = $true
         $stopGatewayItem.Enabled = $false
     } else {
         $statusItem.Text = 'Status: waiting for SillyTavern'
         $notifyIcon.Text = 'ST Mobile Hub: waiting for ST'
         $openHubItem.Enabled = $false
+        $openSillyTavernItem.Enabled = $false
         $startGatewayItem.Enabled = $false
         $stopGatewayItem.Enabled = $false
     }

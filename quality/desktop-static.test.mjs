@@ -217,6 +217,10 @@ test('desktop hub tray is single-instance, hidden, Idle, and opt-in at Windows s
   assert.match(tray, /RETRY_STATE_RESTORED/);
   assert.match(tray, /st-mobile-gateway-suppression\/v1/);
   assert.match(tray, /sillytavern-mobile-auth-hub/);
+  assert.match(tray, /Open SillyTavern on Desktop/);
+  assert.match(tray, /Open-VerifiedSillyTavernDesktop/);
+  assert.match(tray, /Get-SillyTavernSession[\s\S]*-ThrowOnInvalid[\s\S]*Start-Process -FilePath "http:\/\/127\.0\.0\.1:\$Port\/"/);
+  assert.match(tray, /\$openSillyTavernItem\.Enabled = \$stReady/);
   assert.match(tray, /schema = 'st-mobile-tray-process\/v2'/);
   assert.match(tray, /stopCapability = \[guid\]::NewGuid\(\)\.ToString\('D'\)/);
   assert.match(common, /CommandLineToArgvW/);
@@ -263,6 +267,52 @@ test('desktop hub tray is single-instance, hidden, Idle, and opt-in at Windows s
   assert.match(stop, /Assert-StMobilePinnedProcessIdentity/);
   assert.match(stop, /TerminatePinnedProcess/);
   assert.match(stop, /PriorityClass = \[System\.Diagnostics\.ProcessPriorityClass\]::Idle/);
+});
+
+test('tray desktop-open action revalidates the exact ST session before opening loopback', async () => {
+  const tray = await text('scripts/Start-StMobileTray.ps1');
+  const start = tray.indexOf('function Open-VerifiedSillyTavernDesktop');
+  const end = tray.indexOf('$context = New-Object System.Windows.Forms.ApplicationContext', start);
+  assert.ok(start >= 0 && end > start);
+  const helperSource = tray.slice(start, end);
+  assert.doesNotMatch(helperSource, /Start-GatewayAttempt|Start-HiddenIdlePowerShell|Start-StMobile\.ps1/);
+  const helper = helperSource.replaceAll("'", "''");
+  const result = JSON.parse(execFileSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-Command', `
+$ErrorActionPreference='Stop'
+$script:failVerification=$false
+$script:opened=$null
+$script:verification=$null
+function Get-SillyTavernSession {
+  param([int]$Port,[string]$SillyTavernRoot,[string]$RecordPath,[switch]$ThrowOnInvalid)
+  $script:verification=[pscustomobject]@{port=$Port;root=$SillyTavernRoot;record=$RecordPath;throwOnInvalid=$ThrowOnInvalid.IsPresent}
+  if($script:failVerification){return $null}
+  return [pscustomobject]@{Key='verified-session'}
+}
+function Start-Process { param([string]$FilePath);$script:opened=$FilePath }
+Invoke-Expression '${helper}'
+Open-VerifiedSillyTavernDesktop -Port 3000 -Root 'C:\\VerifiedST' -RecordPath 'C:\\State\\sillytavern-process.json'
+$success=[pscustomobject]@{opened=$script:opened;verification=$script:verification}
+$script:opened=$null
+$script:failVerification=$true
+$blocked=$false
+try{Open-VerifiedSillyTavernDesktop -Port 3000 -Root 'C:\\VerifiedST' -RecordPath 'C:\\State\\sillytavern-process.json'}catch{$blocked=$_.Exception.Message -like '*No live root-verified*'}
+[pscustomobject]@{success=$success;blocked=$blocked;openedAfterFailure=$script:opened}|ConvertTo-Json -Depth 5 -Compress
+`,
+  ], { encoding: 'utf8', windowsHide: true }));
+  assert.deepEqual(result, {
+    success: {
+      opened: 'http://127.0.0.1:3000/',
+      verification: {
+        port: 3000,
+        root: 'C:\\VerifiedST',
+        record: 'C:\\State\\sillytavern-process.json',
+        throwOnInvalid: true,
+      },
+    },
+    blocked: true,
+    openedAfterFailure: null,
+  });
 });
 
 test('auth-hub URL and tray-stop control records are canonical, instance-bound, and reparse-safe', async () => {
