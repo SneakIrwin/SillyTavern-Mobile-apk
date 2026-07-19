@@ -1,0 +1,109 @@
+name: Release parity
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - update/latest.json
+      - update/SillyTavern-Mobile-debug.apk
+      - .github/workflows/release-parity.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-parity
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify and publish matching release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact main revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify updater metadata and APK bytes
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(node -p "require('./update/latest.json').versionName")"
+          version_code="$(node -p "require('./update/latest.json').versionCode")"
+          expected_sha="$(node -p "require('./update/latest.json').sha256.toLowerCase()")"
+          actual_sha="$(sha256sum update/SillyTavern-Mobile-debug.apk | awk '{print tolower($1)}')"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid semantic version in update/latest.json: $version" >&2
+            exit 1
+          fi
+          if [[ ! "$version_code" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Invalid positive versionCode in update/latest.json: $version_code" >&2
+            exit 1
+          fi
+          if [[ "$expected_sha" != "$actual_sha" ]]; then
+            echo "APK SHA-256 does not match update/latest.json" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "sha256=$actual_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Create or verify the matching GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.metadata.outputs.tag }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          VERSION_CODE: ${{ steps.metadata.outputs.version_code }}
+          EXPECTED_SHA: ${{ steps.metadata.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            tag_sha="$(git rev-list -n 1 "$TAG")"
+            if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+              echo "$TAG already points to $tag_sha, not updater revision $GITHUB_SHA" >&2
+              exit 1
+            fi
+          fi
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" update/SillyTavern-Mobile-debug.apk \
+              --target "$GITHUB_SHA" \
+              --title "SillyTavern Mobile $VERSION" \
+              --notes "Android version $VERSION (versionCode $VERSION_CODE). The attached APK is the same SHA-256-verified artifact advertised by update/latest.json."
+          fi
+
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          tag_sha="$(git rev-list -n 1 "$TAG")"
+          if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+            echo "$TAG resolves to $tag_sha, not updater revision $GITHUB_SHA" >&2
+            exit 1
+          fi
+
+          asset_dir="$RUNNER_TEMP/release-parity-$GITHUB_RUN_ID"
+          mkdir -p "$asset_dir"
+          gh release download "$TAG" \
+            --pattern SillyTavern-Mobile-debug.apk \
+            --dir "$asset_dir"
+          release_sha="$(sha256sum "$asset_dir/SillyTavern-Mobile-debug.apk" | awk '{print tolower($1)}')"
+          if [[ "$release_sha" != "$EXPECTED_SHA" ]]; then
+            echo "The $TAG release APK does not match update/latest.json" >&2
+            exit 1
+          fi
+
+          echo "Release parity verified for $TAG at $GITHUB_SHA ($EXPECTED_SHA)"
+
+# Rank Audit for this workflow:
+# - Rank 4: every updater-artifact push to main must resolve to a same-version
+#   GitHub tag and Release whose APK exactly matches the manifest SHA-256; an
+#   existing tag may never be moved silently, and any mismatch fails closed.

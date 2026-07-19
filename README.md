@@ -126,6 +126,15 @@ When the app sees a higher `versionCode` in `latest.json`, Android will still as
 
 The GitHub repository must remain public for this no-credentials update channel. The APK does not embed a GitHub token.
 
+### Release parity contract
+
+- [Rank 4] Every pushed update on `main` must keep `update/latest.json`, `update/SillyTavern-Mobile-debug.apk`, the matching `v<versionName>` tag, and the GitHub Release in parity. The Release asset must have the exact SHA-256 advertised by the manifest.
+- [Rank 4] `.github/workflows/release-parity.yml` creates a missing matching tag and Release automatically, but fails closed if an existing tag points at another revision or the manifest, repository APK, and Release APK do not contain identical bytes.
+
+Rank Audit for this release-parity contract:
+
+- Rank 4: updater metadata, updater APK, immutable version tag, and GitHub Release remain version- and byte-identical; inconsistencies block publication rather than being silently rewritten.
+
 ## License
 
 This project is licensed under the GNU Affero General Public License v3.0 to match SillyTavern. See `LICENSE`.
