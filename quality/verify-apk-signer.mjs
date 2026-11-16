@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export function verifyApkSigner(output, expected) {
-  const observed = [...new Set([...output.matchAll(/^Signer\b[^\r\n]*certificate SHA-256 digest:\s*([0-9a-f]{64})\s*$/gim)]
+  const observed = [...new Set([...output.matchAll(/^(?:V\d+(?:\.\d+)?\s+)?Signer\b[^\r\n]*certificate SHA-256 digest:\s*([0-9a-f]{64})\s*$/gim)]
     .map((match) => match[1].toLowerCase()))];
   if (observed.length !== 1 || observed[0] !== expected.toLowerCase()) {
     throw new Error(`APK upgrade signer mismatch: expected ${expected}; observed ${JSON.stringify(observed)}`);

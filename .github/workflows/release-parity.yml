@@ -8,6 +8,8 @@ on:
       - update/latest.json
       - update/SillyTavern-Mobile-debug.apk
       - .github/workflows/release-parity.yml
+      - quality/release-signing.json
+      - quality/verify-apk-signer.mjs
   workflow_dispatch:
 
 permissions:

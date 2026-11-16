@@ -6,6 +6,10 @@ import { verifyApkSigner } from './verify-apk-signer.mjs';
 test('signer identity comparison tolerates tool rendering, not a different or missing certificate', () => {
   const digest = 'e19a30327cb2b6500429ef6ad54f296f21dd4968842744b6340545d895f31456';
   assert.equal(verifyApkSigner(`Signer #1 certificate SHA-256 digest: ${digest.toUpperCase()}\r\n`, digest), digest);
+  // Captured from the actual hosted build-tools 37.0.0 job, not an assumed format.
+  assert.equal(verifyApkSigner(`V2 Signer: certificate SHA-256 digest: ${digest}\n`, digest), digest);
+  assert.equal(verifyApkSigner(`V2 Signer: certificate SHA-256 digest: ${digest}\nV3.1 Signer: certificate SHA-256 digest: ${digest}\n`, digest), digest);
+  assert.throws(() => verifyApkSigner(`Source Stamp Signer certificate SHA-256 digest: ${digest}\n`, digest), /mismatch/);
   assert.throws(() => verifyApkSigner('', digest), /mismatch/);
   assert.throws(() => verifyApkSigner(`Signer #1 certificate SHA-256 digest: ${'0'.repeat(64)}\n`, digest), /mismatch/);
   assert.throws(() => verifyApkSigner(`Signer #1 certificate SHA-256 digest: ${digest}\nSigner #2 certificate SHA-256 digest: ${'0'.repeat(64)}\n`, digest), /mismatch/);
