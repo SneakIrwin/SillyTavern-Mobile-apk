@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { verifyApkSigner } from './verify-apk-signer.mjs';
+
+test('signer identity comparison tolerates tool rendering, not a different or missing certificate', () => {
+  const digest = 'e19a30327cb2b6500429ef6ad54f296f21dd4968842744b6340545d895f31456';
+  assert.equal(verifyApkSigner(`Signer #1 certificate SHA-256 digest: ${digest.toUpperCase()}\r\n`, digest), digest);
+  assert.throws(() => verifyApkSigner('', digest), /mismatch/);
+  assert.throws(() => verifyApkSigner(`Signer #1 certificate SHA-256 digest: ${'0'.repeat(64)}\n`, digest), /mismatch/);
+  assert.throws(() => verifyApkSigner(`Signer #1 certificate SHA-256 digest: ${digest}\nSigner #2 certificate SHA-256 digest: ${'0'.repeat(64)}\n`, digest), /mismatch/);
+});
 
 const source = (name) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
 
