@@ -1,0 +1,5 @@
+{
+  "packageName": "app.sillytavern.securemobile",
+  "certificateSha256": "e19a30327cb2b6500429ef6ad54f296f21dd4968842744b6340545d895f31456",
+  "identity": "Existing v0.1.8 compatibility signer; preserve this identity for in-place upgrades. The private keystore is never committed."
+}

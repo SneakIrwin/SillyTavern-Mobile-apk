@@ -4,10 +4,13 @@ param(
     [string]$JdkVersion = '21.0.11+10',
     [string]$JdkSha256 = 'd3625e7cadf23787ea540229544b6e2ab494b3b54da1801879e583e1dfee0a64',
     [string]$CommandLineToolsRevision = '15641748',
-    [string]$CommandLineToolsSha256 = 'f911b4f03fbee117e2d22edb5f51a5efeae4e8c8aa78bb6bd3de4862ae299da6'
+    [string]$CommandLineToolsSha256 = 'f911b4f03fbee117e2d22edb5f51a5efeae4e8c8aa78bb6bd3de4862ae299da6',
+    [string]$PlatformToolsVersion = '37.0.3',
+    [string]$PlatformToolsSha256 = 'b5d2015f5d5b7a24a2ac646a245f20f63fb501e4174c61863c74bed1df6de4bd'
 )
 
 $ErrorActionPreference = 'Stop'
+[System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Idle
 
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 $ToolsRoot = Join-Path $ProjectRoot '.tools'
@@ -16,7 +19,7 @@ $JdkRoot = Join-Path $ToolsRoot 'jdk-21'
 $SdkRoot = Join-Path $ToolsRoot 'android-sdk'
 $GradleRoot = Join-Path $ToolsRoot "gradle-$GradleVersion"
 $AndroidRoot = Join-Path $ProjectRoot 'android'
-$ApkPath = Join-Path $AndroidRoot 'app\build\outputs\apk\debug\app-debug.apk'
+$ApkPath = Join-Path $AndroidRoot 'app\build\outputs\apk\release\app-release.apk'
 $UpdateRoot = Join-Path $ProjectRoot 'update'
 $UpdateApkName = 'SillyTavern-Mobile-debug.apk'
 $UpdateApkPath = Join-Path $UpdateRoot $UpdateApkName
@@ -27,6 +30,11 @@ $AndroidCaPath = Join-Path $AndroidRoot 'app\src\main\res\raw\st_mobile_ca.crt'
 $ProtectCertAcls = Join-Path $ProjectRoot 'scripts\Protect-CertAcls.ps1'
 $SdkHashManifest = Join-Path $ProjectRoot 'quality\android-sdk-package-hashes.tsv'
 $GradleVerificationMetadata = Join-Path $AndroidRoot 'gradle\verification-metadata.xml'
+$SigningPolicyPath = Join-Path $ProjectRoot 'quality\release-signing.json'
+$SigningStore = if ($env:ST_MOBILE_SIGNING_STORE) { $env:ST_MOBILE_SIGNING_STORE } else { Join-Path $env:USERPROFILE '.android\debug.keystore' }
+if (-not (Test-Path -LiteralPath $SigningStore -PathType Leaf)) {
+    throw 'The existing signing keystore is required. Restore it or set ST_MOBILE_SIGNING_STORE; never generate a replacement identity for an update.'
+}
 
 New-Item -ItemType Directory -Force -Path $ToolsRoot, $DownloadsRoot, $SdkRoot | Out-Null
 
@@ -37,7 +45,8 @@ function Assert-UnderTools([string]$PathToCheck) {
     } else {
         [System.IO.Path]::GetFullPath($PathToCheck)
     }
-    if (-not $resolvedPath.StartsWith($resolvedTools, [System.StringComparison]::OrdinalIgnoreCase)) {
+    $toolsPrefix = $resolvedTools.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedPath.StartsWith($toolsPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to modify path outside tools root: $resolvedPath"
     }
 }
@@ -104,6 +113,16 @@ function Ensure-Jdk {
 }
 
 function Ensure-AndroidSdk {
+    $env:ANDROID_HOME = $SdkRoot
+    $env:ANDROID_SDK_ROOT = $SdkRoot
+    $sdkManager = Join-Path $SdkRoot 'cmdline-tools\latest\bin\sdkmanager.bat'
+    $packageRoots = @('platform-tools', 'platforms\android-36', 'build-tools\36.0.0')
+    if (@($packageRoots | Where-Object { -not (Test-Path -LiteralPath (Join-Path $SdkRoot $_) -PathType Container) }).Count -eq 0) {
+        # Never update installed packages before verifying their pinned bytes.
+        # A new SDK release must be reviewed and repinned deliberately.
+        Assert-AndroidSdkPackageHashes
+        return $sdkManager
+    }
     $zip = Join-Path $DownloadsRoot "commandlinetools-win-$CommandLineToolsRevision`_latest.zip"
     Ensure-Archive "https://dl.google.com/android/repository/commandlinetools-win-$CommandLineToolsRevision`_latest.zip" $zip $CommandLineToolsSha256 "Android command-line tools $CommandLineToolsRevision"
 
@@ -124,14 +143,21 @@ function Ensure-AndroidSdk {
     $env:ANDROID_HOME = $SdkRoot
     $env:ANDROID_SDK_ROOT = $SdkRoot
 
-    Write-Host 'Accepting Android SDK licenses'
-    1..100 | ForEach-Object { 'y' } | & $sdkManager "--sdk_root=$SdkRoot" --licenses | Out-Host
-
-    Write-Host 'Installing Android SDK platform/build tools'
-    & $sdkManager "--sdk_root=$SdkRoot" 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+    Write-Host 'Installing only the required Android SDK packages (no blanket license acceptance or updates)'
+    & $sdkManager "--sdk_root=$SdkRoot" 'platforms;android-36' 'build-tools;36.0.0'
     if ($LASTEXITCODE -ne 0) {
         throw "sdkmanager failed with exit code $LASTEXITCODE"
     }
+
+    $platformZip = Join-Path $DownloadsRoot "platform-tools-$PlatformToolsVersion.zip"
+    Ensure-Archive "https://dl.google.com/android/repository/platform-tools_r$PlatformToolsVersion-win.zip" $platformZip $PlatformToolsSha256 "Android platform tools $PlatformToolsVersion"
+    $platformTmp = Join-Path $ToolsRoot 'platform-tools-extract'
+    Remove-UnderTools $platformTmp
+    Expand-Archive -LiteralPath $platformZip -DestinationPath $platformTmp -Force
+    $platformRoot = Join-Path $SdkRoot 'platform-tools'
+    Remove-UnderTools $platformRoot
+    Move-Item -LiteralPath (Join-Path $platformTmp 'platform-tools') -Destination $platformRoot
+    Remove-UnderTools $platformTmp
 
     Assert-AndroidSdkPackageHashes
     return $sdkManager
@@ -213,6 +239,9 @@ function Assert-AndroidSdkPackageHashes {
         }
         Get-ChildItem -Recurse -File -LiteralPath $packageRoot | ForEach-Object {
             $relative = $_.FullName.Substring($ProjectRoot.Path.Length + 1).Replace('\', '/')
+            # sdkmanager generates this bookkeeping file; the signed archive's
+            # executable payload and source.properties remain pinned below.
+            if ($relative -eq '.tools/android-sdk/platform-tools/package.xml') { return }
             [void]$actualPaths.Add($relative)
             if (-not $expected.ContainsKey($relative)) {
                 throw "Unexpected Android SDK package file not present in manifest: $relative"
@@ -255,9 +284,16 @@ function Assert-ApkCaMatchesGateway {
     $extractPath = Join-Path $extractDir 'st_mobile_ca.crt'
     $zip = [System.IO.Compression.ZipFile]::OpenRead($ApkPath)
     try {
-        $entry = $zip.Entries | Where-Object { $_.FullName -eq 'res/raw/st_mobile_ca.crt' -or $_.FullName -eq 'res/raw/st_mobile_ca' } | Select-Object -First 1
+        # Release resource optimization renames physical entries. Resolve the
+        # actual raw/st_mobile_ca resource rather than assuming a ZIP pathname.
+        $aapt2 = Join-Path $SdkRoot 'build-tools\36.0.0\aapt2.exe'
+        $resources = @(& $aapt2 dump resources $ApkPath 2>&1) -join "`n"
+        if ($LASTEXITCODE -ne 0) { throw 'Could not inspect APK resource mapping.' }
+        $mapping = [regex]::Matches($resources, '(?m)^\s*resource 0x[0-9a-fA-F]+ raw/st_mobile_ca\r?\n\s*\(\) \(file\) (res/[^\r\n]+)')
+        if ($mapping.Count -ne 1) { throw 'APK must have one default raw/st_mobile_ca resource.' }
+        $entry = $zip.GetEntry($mapping[0].Groups[1].Value.Trim())
         if (-not $entry) {
-            throw 'Built APK does not contain res/raw/st_mobile_ca.crt'
+            throw 'Built APK does not contain its mapped raw/st_mobile_ca certificate'
         }
         [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $extractPath, $true)
     } finally {
@@ -310,6 +346,31 @@ function Write-UpdateManifest {
     Get-Item $UpdateApkPath, $UpdateManifestPath | Select-Object FullName, Length, LastWriteTime
 }
 
+function Assert-ReleaseApk {
+    $policy = Get-Content -LiteralPath $SigningPolicyPath -Raw | ConvertFrom-Json
+    $signer = Join-Path $SdkRoot 'build-tools\36.0.0\apksigner.bat'
+    $signerOutput = @(& $signer verify --print-certs $ApkPath 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw 'Release APK signature verification failed.' }
+    $digests = @($signerOutput | ForEach-Object {
+        if ([string]$_ -match '^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$') { $Matches[1].ToLowerInvariant() }
+    })
+    if ($digests.Count -ne 1 -or $digests[0] -cne $policy.certificateSha256) {
+        throw 'Release APK signing identity differs from the installed-app compatibility signer. Updater artifacts were not replaced.'
+    }
+    $aapt = Join-Path $SdkRoot 'build-tools\36.0.0\aapt.exe'
+    $badging = @(& $aapt dump badging $ApkPath 2>&1)
+    if ($LASTEXITCODE -ne 0 -or ($badging -match '^application-debuggable')) {
+        throw 'Release APK must be readable and non-debuggable.'
+    }
+    $metadata = Get-AndroidVersionMetadata
+    $package = @($badging | Where-Object { $_ -match '^package: ' }) -join ''
+    $expected = "package: name='$($policy.packageName)' versionCode='$($metadata.VersionCode)' versionName='$($metadata.VersionName)'"
+    if (-not $package.StartsWith($expected, [System.StringComparison]::Ordinal)) {
+        throw 'Release APK package/version differs from source metadata.'
+    }
+    Write-Host "Verified non-debuggable release and compatible signing certificate: $($digests[0])"
+}
+
 Sync-GatewayCa
 $javaOutput = @(Ensure-Jdk)
 $java = $javaOutput | Where-Object { [string]$_ -match '\\bin\\java\.exe$' } | Select-Object -Last 1
@@ -327,9 +388,9 @@ if (-not $gradle) {
     throw "Could not resolve extracted Gradle executable from Ensure-Gradle output: $($gradleOutput -join ' | ')"
 }
 
-Write-Host 'Building debug APK'
+Write-Host 'Building signed non-debuggable release APK'
 Assert-GradleDependencyVerification
-& $gradle -p $AndroidRoot --no-daemon --console=plain --dependency-verification strict :app:assembleDebug
+& $gradle -p $AndroidRoot --no-daemon --console=plain --dependency-verification strict :app:assembleRelease
 if ($LASTEXITCODE -ne 0) {
     throw "Gradle failed with exit code $LASTEXITCODE"
 }
@@ -339,5 +400,6 @@ if (-not (Test-Path $ApkPath)) {
 }
 
 Assert-ApkCaMatchesGateway
+Assert-ReleaseApk
 Write-UpdateManifest
 Get-Item $ApkPath | Select-Object FullName, Length, LastWriteTime

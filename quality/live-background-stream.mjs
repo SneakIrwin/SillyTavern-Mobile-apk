@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,18 +10,20 @@ import { createPairingNonce } from '../gateway/src/auth.js';
 import { ensureCertificates } from '../gateway/src/certs.js';
 import { createGatewayServer } from '../gateway/src/server.js';
 import { createStateStore } from '../gateway/src/state.js';
+import { requireDisposableEmulator } from './android-harness-safety.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const adbPath = path.join(projectRoot, '.tools', 'android-sdk', 'platform-tools', 'adb.exe');
 const gatewayPort = 38443;
-const gatewayHost = '192.168.1.215';
+const gatewayHost = process.env.ST_MOBILE_TEST_GATEWAY_HOST || '192.168.1.215';
+const serial = process.env.ST_MOBILE_TEST_SERIAL;
 const packageName = 'app.sillytavern.securemobile';
 const activityName = `${packageName}/.MainActivity`;
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 function adb(...args) {
-  return execFileSync(adbPath, args, { encoding: 'utf8', timeout: 30_000 }).trim();
+  return execFileSync(adbPath, ['-s', serial, ...args], { encoding: 'utf8', timeout: 30_000, windowsHide: true }).trim();
 }
 
 function listen(server) {
@@ -156,12 +158,35 @@ const upstream = http.createServer((req, res) => {
 let gateway;
 let stateDir;
 try {
+  requireDisposableEmulator({ serial, consent: process.env.ST_MOBILE_DISPOSABLE_EMULATOR, probe: adb });
+  if (!process.env.ST_MOBILE_TEST_CERT_DIR) {
+    throw new Error('Set ST_MOBILE_TEST_CERT_DIR to an isolated test CA matching the disposable emulator APK.');
+  }
+  const fixtureDir = await realpath(process.env.ST_MOBILE_TEST_CERT_DIR);
+  const realProject = await realpath(projectRoot);
+  const projectRelative = path.relative(realProject, fixtureDir);
+  if (!projectRelative.startsWith('..' + path.sep) && projectRelative !== '..' && !path.isAbsolute(projectRelative)) {
+    throw new Error('Test CA fixture must be outside the project, including its production state.');
+  }
+  const fixtureFiles = [];
+  for (const name of ['st-mobile-ca.crt', 'st-mobile-ca.key.pem']) {
+    const resolved = await realpath(path.join(fixtureDir, name));
+    if (path.dirname(resolved) !== fixtureDir) {
+      throw new Error('Test CA fixture files must resolve inside the isolated fixture directory.');
+    }
+    fixtureFiles.push([name, resolved]);
+  }
   const upstreamAddress = await listen(upstream);
   stateDir = await mkdtemp(path.join(tmpdir(), 'st-mobile-live-background-'));
   const store = createStateStore({ stateDir });
+  const certDir = path.join(stateDir, 'certs');
+  await mkdir(certDir);
+  for (const [name, source] of fixtureFiles) {
+    await copyFile(source, path.join(certDir, name));
+  }
   const certificates = await ensureCertificates({
-    certDir: path.join(projectRoot, 'state', 'certs'),
-    hostnames: ['localhost'],
+    certDir,
+    hostnames: [gatewayHost],
   });
   gateway = await createGatewayServer({
     target: `http://127.0.0.1:${upstreamAddress.port}`,
@@ -248,6 +273,11 @@ try {
   await close(upstream).catch(() => {});
   if (stateDir) {
     await delay(500);
-    await rm(stateDir, { recursive: true, force: true });
+    const [resolvedTemp, resolvedState] = await Promise.all([realpath(tmpdir()), realpath(stateDir)]);
+    const relative = path.relative(resolvedTemp, resolvedState);
+    if (!relative.startsWith('st-mobile-live-background-') || relative.includes(path.sep) || path.isAbsolute(relative)) {
+      throw new Error('Refusing to remove test state outside its temporary parent');
+    }
+    await rm(resolvedState, { recursive: true, force: true });
   }
 }

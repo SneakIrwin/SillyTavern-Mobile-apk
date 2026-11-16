@@ -11,6 +11,7 @@ try {
 } catch {}
 
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $PSScriptRoot 'StMobileTrayCommon.ps1')
 $StartScript = Join-Path $PSScriptRoot 'Start-StMobile.ps1'
 $LaunchTrayScript = Join-Path $PSScriptRoot 'Launch-StMobileTray.ps1'
 $LogRoot = Join-Path $ProjectRoot 'logs'
@@ -34,13 +35,8 @@ function Test-AuthHubReady {
             if ([int]$response.StatusCode -ne 200 -or $response.Headers['X-ST-Mobile-Hub'] -ne '1') {
                 return $false
             }
-            $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
-            try {
-                $body = $reader.ReadToEnd() | ConvertFrom-Json
-                return $body.service -ceq 'sillytavern-mobile-auth-hub' -and [int]$body.schemaVersion -eq 1
-            } finally {
-                $reader.Dispose()
-            }
+            $body = (Read-StMobileBoundedResponseText -Response $response -MaxCharacters 65536 -ReadTimeoutMilliseconds 1000) | ConvertFrom-Json
+            return $body.service -ceq 'sillytavern-mobile-auth-hub' -and [int]$body.schemaVersion -eq 1
         } finally {
             $response.Dispose()
         }

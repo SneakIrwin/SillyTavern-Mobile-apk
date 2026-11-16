@@ -123,6 +123,37 @@ test('a killed WebView renderer is replaced instead of reusing the dead instance
   assert.match(source, /configureWebView\(\)/);
 });
 
+test('renderer and unclean process loss surface a persistent dismissible warning, not ordinary pause', async () => {
+  const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
+  const recovery = source.match(/private boolean recoverFromRenderProcessLoss\(WebView failedView\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  const pause = source.match(/protected void onPause\(\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  assert.match(recovery, /showInterruptionNotice\(\)/);
+  assert.match(source, /priorProcess != null && !PROCESS_ID\.equals\(priorProcess\)/);
+  assert.match(source, /if \(interrupted \|\|[\s\S]*?\) \{\s*showInterruptionNotice\(\)/);
+  assert.match(source, /interruptionStatus\.setOnClickListener/);
+  assert.doesNotMatch(pause, /showInterruptionNotice/);
+});
+
+test('returning from install permission refetches and revalidates; terminal callback clears the claim', async () => {
+  const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
+  const resume = source.match(/protected void onResume\(\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  assert.match(resume, /waitingForInstallPermission[\s\S]*canRequestPackageInstalls\(\)[\s\S]*updateCheckStarted = false;[\s\S]*checkForUpdateOnLaunch\(true\)/);
+  assert.match(resume, /else if \(waitingForInstallPermission\)[\s\S]*updateRetryButton\.setVisibility\(View\.VISIBLE\)/);
+  assert.match(source, /waitingForInstallPermission = true;[\s\S]*openUnknownAppSourceSettings\(\)/);
+  const check = source.match(/private void checkForUpdateOnLaunch\(boolean reportFailure\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  assert.match(check, /fetchUpdateManifest\(\)[\s\S]*downloadUpdateApk\(manifest\)[\s\S]*sha256Hex\(apkFile\)[\s\S]*isDownloadedPackageExpected\(apkFile, manifest\)[\s\S]*promptInstallVerifiedUpdate/);
+  const callback = source.match(/private void handleUpdateInstallCallback\(Intent intent\) \{[\s\S]*?\n    \}/)?.[0] ?? '';
+  assert.match(callback, /UpdateSessionPolicy\.matches\(expectedSessionId, expectedCallbackToken, sessionId, callbackToken\)/);
+  assert.match(callback, /status != PackageInstaller\.STATUS_PENDING_USER_ACTION\) \{\s*terminalUpdateCallback = true;\s*clearExpectedUpdateCallback\(\)/);
+  assert.match(callback, /status != PackageInstaller\.STATUS_SUCCESS[\s\S]*update_install_failed/);
+  assert.match(callback, /if \(!isOwnedUpdateSession\(sessionId\)\)/);
+  assert.match(callback, /getBoolean\(KEY_UPDATE_CONFIRMATION_LAUNCHED, false\)/);
+  assert.match(callback, /startActivity\(confirmationIntent\);\s*preferences\.edit\(\)\.putBoolean\(KEY_UPDATE_CONFIRMATION_LAUNCHED, true\)/);
+  assert.match(check, /updateCheckStarted \|\| hasOutstandingUpdateSession\(\)/);
+  assert.match(check, /if \(reportFailure\)[\s\S]*updateRetryButton\.setVisibility\(View\.VISIBLE\)/);
+  assert.doesNotMatch(callback, /clearExpectedUpdateCallback\(\);\s*try \{\s*startActivity\(confirmationIntent\)/);
+});
+
 test('launch updater is normal user-approved PackageInstaller flow only', async () => {
   const manifest = await text('android/app/src/main/AndroidManifest.xml');
   const source = await text('android/app/src/main/java/app/sillytavern/securemobile/MainActivity.java');
@@ -141,7 +172,7 @@ test('launch updater is normal user-approved PackageInstaller flow only', async 
   assert.match(source, /PackageInstaller\.EXTRA_SESSION_ID/);
   assert.match(source, /getMySessions\(\)/);
   assert.match(source, /getPackageName\(\)\.equals\(sessionInfo\.getAppPackageName\(\)\)/);
-  assert.match(source, /expectedCallbackToken\.equals\(callbackToken\)/);
+  assert.match(source, /UpdateSessionPolicy\.matches\(expectedSessionId, expectedCallbackToken, sessionId, callbackToken\)/);
   assert.match(source, /clearExpectedUpdateCallback\(\)/);
   assert.doesNotMatch(source, /USER_ACTION_NOT_REQUIRED/);
   assert.doesNotMatch(source, /FLAG_IMMUTABLE/);

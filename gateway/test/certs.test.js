@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,23 @@ import test from 'node:test';
 import { ensureCertificates } from '../src/certs.js';
 import { createStateStore } from '../src/state.js';
 import { protectWindowsPrivatePathAcls } from '../src/windows-acls.js';
+
+test('certificate repair preserves the CA and refuses partial trust identities', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'st-mobile-cert-repair-'));
+  try {
+    const original = await ensureCertificates({ certDir: dir });
+    const ca = await readFile(original.caCertPath);
+    await writeFile(original.serverCertPath, 'damaged server certificate');
+    await ensureCertificates({ certDir: dir });
+    assert.deepEqual(await readFile(original.caCertPath), ca);
+    assert.match(await readFile(original.serverCertPath, 'utf8'), /BEGIN CERTIFICATE/);
+    await unlink(original.caKeyPath);
+    await assert.rejects(ensureCertificates({ certDir: dir }), /Incomplete gateway CA identity/);
+    assert.deepEqual(await readFile(original.caCertPath), ca);
+    await unlink(original.caCertPath);
+    await assert.rejects(ensureCertificates({ certDir: dir }), /server identity exists without its CA/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 
 function execFileText(file, args) {
   return new Promise((resolve, reject) => {

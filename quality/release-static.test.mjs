@@ -1,0 +1,36 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import test from 'node:test';
+
+const source = (name) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
+
+test('publication builds a non-debuggable release with the pinned upgrade signer before replacing updater files', async () => {
+  const build = await source('scripts/Build-Android.ps1');
+  const gradle = await source('android/app/build.gradle');
+  const policy = JSON.parse(await source('quality/release-signing.json'));
+  assert.match(gradle, /release \{[\s\S]*signingConfig signingConfigs\.existingIdentity[\s\S]*debuggable false/);
+  assert.match(build, /:app:assembleRelease/);
+  assert.match(build, /apksigner\.bat/);
+  assert.match(build, /application-debuggable/);
+  assert.match(build, /raw\/st_mobile_ca/);
+  assert.match(build, /\$toolsPrefix = \$resolvedTools\.TrimEnd/);
+  assert.match(build, /Assert-ApkCaMatchesGateway\s+Assert-ReleaseApk\s+Write-UpdateManifest/);
+  assert.equal(policy.certificateSha256, 'e19a30327cb2b6500429ef6ad54f296f21dd4968842744b6340545d895f31456');
+});
+
+test('installed SDK verification precedes any SDK manager mutation and platform tools archive is pinned', async () => {
+  const build = await source('scripts/Build-Android.ps1');
+  const start = build.indexOf('function Ensure-AndroidSdk');
+  const end = build.indexOf('function Ensure-Gradle');
+  const sdk = build.slice(start, end);
+  assert.ok(sdk.indexOf('Assert-AndroidSdkPackageHashes') < sdk.indexOf('Ensure-Archive'));
+  assert.doesNotMatch(sdk, /--licenses/);
+  assert.match(sdk, /platform-tools_r\$PlatformToolsVersion-win\.zip/);
+  assert.match(sdk, /\$PlatformToolsSha256/);
+});
+
+test('one-click hub readiness uses the common bounded response reader', async () => {
+  const sourceText = await source('scripts/Open-StMobileAuthHub.ps1');
+  assert.match(sourceText, /Read-StMobileBoundedResponseText -Response \$response -MaxCharacters 65536 -ReadTimeoutMilliseconds 1000/);
+  assert.doesNotMatch(sourceText, /ReadToEnd\(\)/);
+});

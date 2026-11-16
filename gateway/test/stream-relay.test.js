@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import { consumePairingNonce, createPairingNonce, revokeDevice } from '../src/auth.js';
 import { createGatewayServer } from '../src/server.js';
 import { createStateStore } from '../src/state.js';
+import { createStreamRelayManager } from '../src/stream-relay.js';
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -95,6 +98,107 @@ async function startControlledStreamServer() {
       : new Promise((resolve) => waiters.push(resolve)),
     close: () => close(server),
   };
+}
+
+class BackpressuredResponse extends EventEmitter {
+  socket = { destroyed: false };
+  destroyed = false;
+  writableEnded = false;
+  writableLength = 0;
+  writableHighWaterMark = 16 * 1024;
+  writes = [];
+
+  writeHead() {}
+
+  write(bytes) {
+    this.writes.push(Buffer.from(bytes));
+    this.writableLength += bytes.length;
+    return false;
+  }
+
+  end() {
+    this.writableEnded = true;
+    this.emit('close');
+  }
+
+  destroy() {
+    this.destroyed = true;
+    this.socket.destroyed = true;
+    this.emit('close');
+  }
+
+  drain() {
+    this.writableLength = 0;
+    this.emit('drain');
+  }
+}
+
+async function backpressuredRelayFixture() {
+  const upstream = await startControlledStreamServer();
+  let markTerminal;
+  const terminal = new Promise((resolve) => { markTerminal = resolve; });
+  const manager = createStreamRelayManager({
+    targetUrl: upstream.target,
+    buildUpstreamHeaders: (_req, length) => ({ 'content-length': String(length) }),
+    onEvent: (event) => {
+      if (event.type === 'terminal') markTerminal(event);
+    },
+  });
+  const id = crypto.randomUUID();
+  const device = { tokenHash: 'backpressure-test-owner' };
+  const req = new PassThrough();
+  req.method = 'POST';
+  req.url = '/api/backends/chat-completions/generate';
+  req.headers = relayHeaders(id, 0);
+  const res = new BackpressuredResponse();
+  const handled = manager.handle(req, res, device);
+  req.end(JSON.stringify({ stream: true }));
+  const controlled = await upstream.nextRequest();
+  const bytes = Buffer.from('data: large buffered response\n\n'.repeat(20_000));
+  controlled.res.end(bytes);
+  await terminal;
+  await handled;
+  return { manager, upstream, id, device, res, bytes };
+}
+
+test('completion drains a blocked subscriber cursor before ending its response', async () => {
+  const fixture = await backpressuredRelayFixture();
+  const { manager, upstream, res, bytes } = fixture;
+  try {
+    assert.equal(res.writableEnded, false);
+    assert.equal(res.listenerCount('drain'), 1);
+    for (let drains = 0; !res.writableEnded && drains < 1_000; drains += 1) {
+      assert.ok(res.writableLength <= manager.limits.maxSubscriberQueueBytes);
+      assert.equal(res.listenerCount('drain'), 1);
+      res.drain();
+    }
+    assert.equal(res.writableEnded, true);
+    assert.equal(res.destroyed, false);
+    assert.equal(res.listenerCount('drain'), 0);
+    assert.deepEqual(Buffer.concat(res.writes), bytes);
+  } finally {
+    manager.close();
+    await upstream.close();
+  }
+});
+
+for (const operation of ['cancel', 'close']) {
+  test(`${operation} releases a terminal subscriber still waiting for drain`, async () => {
+    const { manager, upstream, id, device, res } = await backpressuredRelayFixture();
+    try {
+      assert.equal(res.listenerCount('drain'), 1);
+      if (operation === 'cancel') manager.cancel(id, device); else manager.close();
+      assert.equal(res.destroyed, true);
+      assert.equal(res.listenerCount('drain'), 0);
+      assert.equal(manager.ownerSnapshot(device.tokenHash).bufferedRelayBytes, 0);
+      const writeCount = res.writes.length;
+      res.drain();
+      assert.equal(res.writes.length, writeCount);
+    } finally {
+      manager.close();
+      await upstream.close();
+    }
+  });
 }
 
 test('authenticated root injects the blocking relay client once and serves it only to paired devices', async () => {
@@ -275,6 +379,41 @@ test('detaching before upstream headers does not write to a dead response and re
   }
 });
 
+test('large live responses and completed replays respect backpressure without losing bytes or duplicating generation', async () => {
+  const upstream = await startControlledStreamServer();
+  const gateway = await startGateway(upstream.target);
+  try {
+    const session = await pairedSession(gateway.store);
+    const id = crypto.randomUUID();
+    const body = JSON.stringify({ stream: true, prompt: 'large backpressure regression' });
+    const bytes = Buffer.from('data: {"token":"αβγ"}\n\n'.repeat(100_000), 'utf8');
+    assert.ok(bytes.length > 8 * 256 * 1024, 'Fixture must exceed the subscriber queue by a wide margin');
+    const request = (offset) => fetch(`${gateway.url}/api/backends/chat-completions/generate`, {
+      method: 'POST', headers: { ...relayHeaders(id, offset), cookie: session.cookie }, body,
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    const firstFetch = request(0);
+    const controlled = await upstream.nextRequest();
+    controlled.res.end(bytes);
+    const first = await firstFetch;
+    assert.equal(first.status, 200);
+    assert.deepEqual(Buffer.from(await first.arrayBuffer()), bytes);
+
+    // The offset deliberately falls inside an upstream chunk and a UTF-8
+    // sequence. Replay offsets are bytes, not characters or chunk indexes.
+    const offset = bytes.indexOf(Buffer.from('α')) + 1;
+    const replay = await request(offset);
+    assert.equal(replay.status, 200);
+    assert.equal(replay.headers.get('x-st-mobile-relay-state'), 'complete');
+    assert.deepEqual(Buffer.from(await replay.arrayBuffer()), bytes.subarray(offset));
+    assert.equal(upstream.requests.length, 1);
+  } finally {
+    await gateway.close();
+    await upstream.close();
+  }
+});
+
 test('relay refuses encoded upstream streams rather than replaying corrupt bytes', async () => {
   const upstream = http.createServer((req, res) => {
     req.resume();
@@ -298,6 +437,42 @@ test('relay refuses encoded upstream streams rather than replaying corrupt bytes
     assert.equal(response.status, 502);
     assert.match(await response.text(), /Encoded upstream stream is not safe for byte replay/);
   } finally {
+    await gateway.close();
+    await close(upstream);
+  }
+});
+
+test('rejecting an encoded relay also closes an indefinite upstream generation', async () => {
+  let upstreamResponse;
+  let markClosed;
+  const closed = new Promise((resolve) => { markClosed = resolve; });
+  const upstream = http.createServer((req, res) => {
+    upstreamResponse = res;
+    req.resume();
+    req.on('end', () => {
+      res.once('close', markClosed);
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'content-encoding': 'gzip' });
+      res.write('indefinite encoded stream');
+    });
+  });
+  const address = await listen(upstream);
+  const gateway = await startGateway(`http://127.0.0.1:${address.port}`);
+  try {
+    const session = await pairedSession(gateway.store);
+    const response = await fetch(`${gateway.url}/api/backends/chat-completions/generate`, {
+      method: 'POST',
+      headers: { ...relayHeaders(crypto.randomUUID(), 0), cookie: session.cookie },
+      body: JSON.stringify({ stream: true }),
+      signal: AbortSignal.timeout(2_000),
+    });
+    assert.equal(response.status, 502);
+    await response.text();
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Rejected encoded upstream remained open')), 1_000);
+      closed.then(() => { clearTimeout(timer); resolve(); }, reject);
+    });
+  } finally {
+    upstreamResponse?.destroy();
     await gateway.close();
     await close(upstream);
   }

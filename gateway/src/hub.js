@@ -241,7 +241,11 @@ function renderHubHtml() {
         const lastSeen = document.createElement('td'); lastSeen.textContent = fmt(device.lastSeenAt);
         const id = document.createElement('td'); id.textContent = device.deviceId;
         const actions = document.createElement('td'); const button = document.createElement('button'); button.textContent = 'Revoke'; button.disabled = Boolean(device.revokedAt);
-        button.addEventListener('click', async () => { button.disabled = true; await jsonFetch('/api/revoke', { method: 'POST', headers: hubHeader, body: JSON.stringify({ deviceId: device.deviceId }) }); await refresh(); });
+        button.addEventListener('click', async () => {
+          setError(''); button.disabled = true;
+          try { await jsonFetch('/api/revoke', { method: 'POST', headers: hubHeader, body: JSON.stringify({ deviceId: device.deviceId }) }); await refresh(); }
+          catch (error) { setError(error.message); button.disabled = false; }
+        });
         actions.append(button); row.append(status, label, lastSeen, id, actions); els.rows.append(row);
       }
     }
@@ -348,6 +352,9 @@ export async function createAuthHubServer(options) {
   return {
     server,
     url: `http://${host}:${address.port}/`,
-    close: () => new Promise((resolve) => server.close(resolve)),
+    close: () => new Promise((resolve) => {
+      server.close(resolve);
+      server.closeAllConnections();
+    }),
   };
 }

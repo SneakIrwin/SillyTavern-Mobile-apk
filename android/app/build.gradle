@@ -10,7 +10,25 @@ android {
         applicationId 'app.sillytavern.securemobile'
         minSdk 26
         targetSdk 36
-        versionCode 9
-        versionName '0.1.8'
+        versionCode 10
+        versionName '0.1.9'
+    }
+
+    // Preserve the existing installed-app identity. Build-Android.ps1 refuses
+    // a missing store or a signer differing from quality/release-signing.json.
+    signingConfigs {
+        existingIdentity {
+            storeFile file(System.getenv('ST_MOBILE_SIGNING_STORE') ?: "${System.getProperty('user.home')}/.android/debug.keystore")
+            storePassword System.getenv('ST_MOBILE_SIGNING_STORE_PASSWORD') ?: 'android'
+            keyAlias System.getenv('ST_MOBILE_SIGNING_KEY_ALIAS') ?: 'androiddebugkey'
+            keyPassword System.getenv('ST_MOBILE_SIGNING_KEY_PASSWORD') ?: 'android'
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.existingIdentity
+            debuggable false
+            minifyEnabled false
+        }
     }
 }

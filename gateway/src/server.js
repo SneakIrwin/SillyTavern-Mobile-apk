@@ -2,6 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { readFileSync } from 'node:fs';
 import net from 'node:net';
+import tls from 'node:tls';
 import { URL } from 'node:url';
 
 import { COOKIE_NAME, consumePairingNonce, parseCookies, validateRequestSession } from './auth.js';
@@ -182,6 +183,18 @@ function injectStreamRelayClient(body) {
 
 function proxyHttp(targetUrl, req, res, { injectRelayClient = false } = {}) {
   const client = targetUrl.protocol === 'https:' ? https : http;
+  let upstreamResponse;
+  function fail(error) {
+    if (res.destroyed || res.writableEnded) return;
+    if (res.headersSent) {
+      // A truncated representation must fail, never look like successful EOF
+      // (or have a proxy error message appended to its application bytes).
+      res.destroy(error);
+      return;
+    }
+    res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(`Gateway proxy error: ${error.message}\n`);
+  }
   const upstream = client.request({
     protocol: targetUrl.protocol,
     hostname: targetUrl.hostname,
@@ -193,6 +206,12 @@ function proxyHttp(targetUrl, req, res, { injectRelayClient = false } = {}) {
       stripRepresentationConditions: injectRelayClient,
     }),
   }, (upstreamRes) => {
+    upstreamResponse = upstreamRes;
+    upstreamRes.once('error', fail);
+    upstreamRes.once('aborted', () => fail(new Error('Upstream response was interrupted')));
+    upstreamRes.once('close', () => {
+      if (!upstreamRes.complete) fail(new Error('Upstream response closed before completion'));
+    });
     const contentType = String(upstreamRes.headers['content-type'] ?? '').toLowerCase();
     if (injectRelayClient && upstreamRes.statusCode === 200 && contentType.includes('text/html')) {
       const contentEncoding = String(upstreamRes.headers['content-encoding'] ?? 'identity').toLowerCase();
@@ -229,33 +248,37 @@ function proxyHttp(targetUrl, req, res, { injectRelayClient = false } = {}) {
           res.end(`Gateway HTML injection error: ${error.message}\n`);
         }
       });
-      upstreamRes.on('error', (error) => {
-        if (!res.headersSent && !res.destroyed) {
-          res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-          res.end(`Gateway HTML injection error: ${error.message}\n`);
-        }
-      });
       return;
     }
     res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.statusMessage, upstreamRes.headers);
     upstreamRes.pipe(res);
   });
 
-  upstream.on('error', (error) => {
-    if (!res.headersSent) {
-      res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-    }
-    if (!res.destroyed) {
-      res.end(`Gateway proxy error: ${error.message}\n`);
+  upstream.on('error', fail);
+  // This is the ordinary proxy, not a desktop-owned generation relay. A
+  // disconnected consumer must release its ordinary request/response sockets.
+  res.once('close', () => {
+    if (!res.writableFinished) {
+      upstreamResponse?.destroy();
+      upstream.destroy();
     }
   });
+  req.once('aborted', () => upstream.destroy());
+  req.once('error', (error) => { upstream.destroy(); fail(error); });
 
   req.pipe(upstream);
 }
 
 function proxyUpgrade(targetUrl, req, socket, head) {
-  const upstream = net.connect(Number(targetUrl.port || 80), targetUrl.hostname);
-  upstream.once('connect', () => {
+  const secure = targetUrl.protocol === 'https:';
+  const upstream = (secure ? tls : net).connect(Number(targetUrl.port || (secure ? 443 : 80)), targetUrl.hostname);
+  let connected = false;
+  socket.once('close', () => upstream.destroy());
+  socket.once('error', () => upstream.destroy());
+  upstream.once('close', () => { if (!socket.writableEnded) socket.destroy(); });
+  upstream.once(secure ? 'secureConnect' : 'connect', () => {
+    if (socket.destroyed) { upstream.destroy(); return; }
+    connected = true;
     writeHeaderLines(upstream, req.method, req.url, req.httpVersion, proxyHeaders(req, { forUpgrade: true }));
     if (head?.length) {
       upstream.write(head);
@@ -265,8 +288,8 @@ function proxyUpgrade(targetUrl, req, socket, head) {
   });
   upstream.once('error', () => {
     if (!socket.destroyed) {
-      socket.write('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 12\r\n\r\nBad Gateway\n');
-      socket.destroy();
+      if (connected) socket.destroy();
+      else socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 12\r\n\r\nBad Gateway\n');
     }
   });
 }
@@ -280,7 +303,7 @@ export async function createGatewayServer(options) {
   }
 
   const activeSockets = new Map();
-  const trackedSockets = new WeakSet();
+  const trackedSockets = new WeakMap();
   const relayManager = createStreamRelayManager({
     targetUrl,
     limits: options.relayLimits,
@@ -299,20 +322,27 @@ export async function createGatewayServer(options) {
     if (!device?.tokenHash || !socket) {
       return;
     }
-    if (trackedSockets.has(socket)) {
+    const previousOwner = trackedSockets.get(socket);
+    if (previousOwner === device.tokenHash) {
       return;
     }
-    trackedSockets.add(socket);
+    if (previousOwner) {
+      activeSockets.get(previousOwner)?.delete(socket);
+      if (activeSockets.get(previousOwner)?.size === 0) activeSockets.delete(previousOwner);
+    }
+    trackedSockets.set(socket, device.tokenHash);
     if (!activeSockets.has(device.tokenHash)) {
       activeSockets.set(device.tokenHash, new Set());
     }
     activeSockets.get(device.tokenHash).add(socket);
-    socket.once('close', () => {
-      activeSockets.get(device.tokenHash)?.delete(socket);
-      if (activeSockets.get(device.tokenHash)?.size === 0) {
-        activeSockets.delete(device.tokenHash);
-      }
-    });
+    if (!previousOwner) {
+      socket.once('close', () => {
+        const owner = trackedSockets.get(socket);
+        activeSockets.get(owner)?.delete(socket);
+        if (activeSockets.get(owner)?.size === 0) activeSockets.delete(owner);
+        trackedSockets.delete(socket);
+      });
+    }
   }
 
   function getConnectionSnapshot() {
@@ -459,6 +489,11 @@ export async function createGatewayServer(options) {
   const server = options.tls === false
     ? http.createServer(handler)
     : https.createServer(serverOptions, handler);
+  const clientSockets = new Set();
+  server.on('connection', (socket) => {
+    clientSockets.add(socket);
+    socket.once('close', () => clientSockets.delete(socket));
+  });
 
   server.on('upgrade', async (req, socket, head) => {
     try {
@@ -468,6 +503,7 @@ export async function createGatewayServer(options) {
         sendForbidden(socket);
         return;
       }
+      if (socket.destroyed) return;
       trackSocket(device, socket);
       proxyUpgrade(targetUrl, req, socket, head);
     } catch {
@@ -509,6 +545,8 @@ export async function createGatewayServer(options) {
     close: async () => {
       clearInterval(revokeTimer);
       relayManager.close();
+      // Node's server.close/closeAllConnections do not close upgraded sockets.
+      for (const socket of clientSockets) socket.destroy();
       if (hub) {
         await hub.close();
       }

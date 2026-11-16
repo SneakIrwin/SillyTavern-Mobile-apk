@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -105,7 +106,9 @@ test('desktop scripts protect certificate ACLs and pin build downloads', async (
   assert.match(await text('android/gradle/verification-metadata.xml'), /com\.android\.application\.gradle\.plugin/);
 });
 
-test('admin relay processed request records omit live nonce material', async () => {
+// This unrelated local admin helper is intentionally not distributed by this
+// repository. Keep its checks locally without breaking clean public checkouts.
+test('admin relay processed request records omit live nonce material', { skip: !existsSync(path.join(root, 'scripts/AdminRelay-Broker.ps1')) }, async () => {
   const broker = await text('scripts/AdminRelay-Broker.ps1');
 
   assert.match(broker, /function Write-ProcessedRequestFile/);
@@ -1293,7 +1296,7 @@ try {
   } finally { await rm(temporaryRoot, { recursive: true, force: true }); }
 });
 
-test('admin relay drains redirected output concurrently before waiting for child exit', async () => {
+test('admin relay drains redirected output concurrently before waiting for child exit', { skip: !existsSync(path.join(root, 'scripts/AdminRelay-Broker.ps1')) }, async () => {
   const broker = await text('scripts/AdminRelay-Broker.ps1');
   const start = broker.indexOf('[void]$process.Start()');
   const wait = broker.indexOf('$process.WaitForExit($timeoutMs)', start);

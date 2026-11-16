@@ -1,6 +1,6 @@
 # SillyTavern Secure Mobile
 
-This project builds a debug Android APK that opens your desktop SillyTavern UI through a local HTTPS gateway.
+This project builds a signed, non-debuggable Android release APK that opens your desktop SillyTavern UI through a local HTTPS gateway.
 
 ## Security Shape
 
@@ -24,7 +24,7 @@ This project builds a debug Android APK that opens your desktop SillyTavern UI t
 
 ## Paths
 
-- APK: `android/app/build/outputs/apk/debug/app-debug.apk`
+- Release APK: `android/app/build/outputs/apk/release/app-release.apk`
 - GitHub update APK: `update/SillyTavern-Mobile-debug.apk`
 - GitHub update manifest: `update/latest.json`
 - Gateway state: `state/state.json`
@@ -129,7 +129,11 @@ update/latest.json
 update/SillyTavern-Mobile-debug.apk
 ```
 
-When the app sees a higher `versionCode` in `latest.json`, Android will still ask before installing. If Android has not allowed this app to install unknown apps yet, the app opens the standard settings page and retries on the next launch.
+When the app sees a higher `versionCode` in `latest.json`, Android will still ask before installing. If Android has not allowed this app to install unknown apps yet, the app opens the standard settings page, then refetches and revalidates the update when permission is granted. A denied permission or failed retry exposes a native **Retry update** button. An outstanding installer session prevents duplicate sessions, and callbacks remain correlated through user confirmation and the final outcome.
+
+The legacy `SillyTavern-Mobile-debug.apk` updater/Release asset filename is retained for compatibility, but v0.1.9 and newer contain release-build bytes. Builds require the existing signing keystore (default locator: `%USERPROFILE%/.android/debug.keystore`, or `ST_MOBILE_SIGNING_STORE`); they never generate a replacement identity for publication. Optional signing-store password/alias/key-password environment overrides are `ST_MOBILE_SIGNING_STORE_PASSWORD`, `ST_MOBILE_SIGNING_KEY_ALIAS`, and `ST_MOBILE_SIGNING_KEY_PASSWORD`. The public certificate digest is pinned in `quality/release-signing.json`. Keep the existing private keystore backed up securely: a new key is not an in-place upgrade. Publication checks signature, package/version, non-debuggable status and embedded CA before replacing updater files; CI independently checks signature/package/version as well as artifact hashes.
+
+An installed SDK is hash-verified before any SDK manager invocation. Platform-tools 37.0.3 is installed from its versioned SHA-256-pinned Google archive, not the mutable `platform-tools` package selector. Generated `platform-tools/package.xml` bookkeeping is excluded; executable payloads and `source.properties` remain pinned. A mismatched installed SDK fails rather than silently updating or repinning it. Fresh SDK setup may require accepting the licenses for the requested packages interactively; builds do not blanket-accept unrelated SDK licenses.
 
 The GitHub repository must remain public for this no-credentials update channel. The APK does not embed a GitHub token.
 
@@ -141,6 +145,14 @@ The GitHub repository must remain public for this no-credentials update channel.
 Rank Audit for this release-parity contract:
 
 - Rank 4: updater metadata, updater APK, immutable version tag, and GitHub Release remain version- and byte-identical; inconsistencies block publication rather than being silently rewritten.
+
+## Audit and recovery boundaries
+
+The [2026-11-16 audit](docs/audit-2026-11-16.md) covers the Android wrapper, gateway/relay, desktop launch/hub and build/update pipeline. Large replays now respect transport backpressure; ordinary HTTP truncation fails promptly, and upgraded sockets close on revocation/shutdown. Re-pairing over a reused TCP connection updates its authenticated owner. Certificate repair preserves the existing CA; a missing half of its identity fails with restore guidance instead of silently breaking paired-device trust.
+
+Renderer loss or an unclean prior app process shows a dismissible interruption notice. It does not claim to restore an unsaved draft or an in-progress consumer after process/page loss. Replay state is in gateway memory: gateway restart, capacity eviction, expiry, page reload and whole-process loss are not durable generation reconstruction. Do not manually retry a potentially submitted generation without checking its actual state.
+
+`quality/live-background-stream.mjs` is destructive only to an explicitly selected **disposable emulator**. It refuses physical/default devices and requires `ST_MOBILE_TEST_SERIAL` and `ST_MOBILE_DISPOSABLE_EMULATOR` to name the same emulator, plus `ST_MOBILE_TEST_CERT_DIR` pointing to a separate generated test CA outside the project. The emulator APK must embed that test CA. All ADB calls are serial-scoped and hidden; production certificates/pairing state are not a test fixture. `ST_MOBILE_TEST_GATEWAY_HOST=10.0.2.2` supports the emulator's host-loopback alias.
 
 ## License
 

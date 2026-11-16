@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "catalog_kind": "local",
+  "workspace_path": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile",
+  "catalog_scope": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile",
+  "updated_at_utc": "2026-11-16T22:03:43.8428729Z",
+  "registry_path": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\MasterReference\\registry.json",
+  "master_page_path": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\MASTER_REFERENCE.md",
+  "shared_registry_path": "D:\\Agent_Sync\\MasterReference\\registry.json",
+  "shared_page_path": "D:\\Agent_Sync\\MASTER_REFERENCE.md",
+  "bootstrap_path": "D:\\Agent_Sync\\MasterReference\\WORKSPACE_BOOTSTRAP.md",
+  "changelog_path": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\MasterReference\\CHANGELOG.jsonl",
+  "records": [
+    {
+      "id": "st-mobile.architecture",
+      "label": "App and relay boundaries",
+      "category": "Project operation",
+      "scope": "sillytavern-secure-mobile",
+      "value": "Android WebView uses native system/IME insets and authenticated HTTPS LAN gateway; ST stays loopback. Gateway owns bounded in-memory replay, not durable page/process reconstruction.",
+      "status": "Source audited 2026-11-16; exact checks and limits in audit report",
+      "owner": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\README.md",
+      "sources": [
+        {"path": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\README.md", "kind": "exists", "expected": {"exists": true}},
+        {"path": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\docs\\audit-2026-11-16.md", "kind": "exists", "expected": {"exists": true}}
+      ],
+      "dependents": ["st-mobile.desktop", "st-mobile.release"],
+      "provenance": {"source": "Direct user request to audit and improve existing project", "task_id": "019f4fb5-3419-71b1-bad5-9fd7a91d7f23", "verified_at_utc": "2026-11-16"},
+      "notes": "Preserve paired origin/cookies and original CA. Credential locators only: state/state.json and state/certs. No JavaScript bridge, PiP, overlay, wake lock or foreground service. Project-scoped latest request does not authorize desktop control."
+    },
+    {
+      "id": "st-mobile.desktop",
+      "label": "Desktop tray and launch ownership",
+      "category": "Project operation",
+      "scope": "sillytavern-secure-mobile/desktop",
+      "value": "ST Launcher option 1 and Desktop AI Tools one-click integration start/reuse verified ST/gateway/tray. Startup is opt-in. All automatic launches hidden/no-focus at Idle; exact owned identities govern stop/removal.",
+      "status": "Saved launch paths retained; 2026-11-16 baseline startup absent and ST/hub/tray stopped, not changed by audit",
+      "owner": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\scripts",
+      "sources": [
+        {"path": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\scripts\\Start-StMobileTray.ps1", "kind": "exists", "expected": {"exists": true}},
+        {"path": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\scripts\\Open-StMobileAuthHub.ps1", "kind": "exists", "expected": {"exists": true}},
+        {"path": "C:\\ProgramData\\Codex\\BackgroundProcesses\\agents\\codex\\BACKGROUND_PROCESSES.md", "kind": "exists", "expected": {"exists": true}}
+      ],
+      "dependents": [],
+      "notes": "Runtime must be re-read, never inferred from historical PIDs. Commands and exact disable/remove instructions remain in README and durable background-process registry. No new persistent trigger is introduced."
+    },
+    {
+      "id": "st-mobile.release",
+      "label": "Build and publication contract",
+      "category": "Release",
+      "scope": "sillytavern-secure-mobile/release",
+      "value": "v0.1.9 / versionCode 10; non-debuggable release signed with the existing upgrade-compatible certificate. Keep Git, updater APK/manifest, tag and GitHub Release in parity.",
+      "status": "Local signed release built and checked; publication/readback recorded in audit report",
+      "owner": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\scripts\\Build-Android.ps1",
+      "sources": [
+        {"path": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\quality\\release-signing.json", "kind": "exists", "expected": {"exists": true}},
+        {"path": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\update\\latest.json", "kind": "exists", "expected": {"exists": true}},
+        {"path": "C:\\Users\\Sneak\\Documents\\Codex\\Misc\\sillytavern-secure-mobile\\.github\\workflows\\release-parity.yml", "kind": "exists", "expected": {"exists": true}}
+      ],
+      "dependents": [],
+      "notes": "Signing-key locator: %USERPROFILE%/.android/debug.keystore or ST_MOBILE_SIGNING_STORE; secret values are never cataloged. Legacy updater asset filename remains SillyTavern-Mobile-debug.apk, but its bytes are release. Installed SDK is verified before mutation; platform-tools archive is versioned and pinned. Full checks: npm test and scripts/Build-Android.ps1."
+    }
+  ],
+  "workspaces": [],
+  "external_references": [
+    {
+      "label": "Shared index and global rule references",
+      "page": "D:\\Agent_Sync\\MASTER_REFERENCE.md",
+      "registry": "D:\\Agent_Sync\\MasterReference\\registry.json",
+      "scope": "global"
+    },
+    {
+      "label": "Portable bootstrap and global owner instructions",
+      "page": "D:\\Agent_Sync\\MasterReference\\WORKSPACE_BOOTSTRAP.md",
+      "registry": "D:\\Agent_Sync\\MasterReference\\registry.json",
+      "scope": "global"
+    }
+  ]
+}

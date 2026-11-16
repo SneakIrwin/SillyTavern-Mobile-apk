@@ -62,6 +62,10 @@ public class MainActivity extends Activity {
     private static final int EXPECTED_GATEWAY_PORT = 38443;
     private static final String PREFS = "st_mobile";
     private static final String KEY_GATEWAY_ORIGIN = "gateway_origin";
+    private static final String KEY_SESSION_PROCESS = "session_process";
+    private static final String STATE_WAITING_INSTALL_PERMISSION = "waiting_install_permission";
+    private static final String STATE_INTERRUPTION_VISIBLE = "interruption_visible";
+    private static final String PROCESS_ID = UUID.randomUUID().toString();
     private static final String UPDATE_HOST = "raw.githubusercontent.com";
     private static final String UPDATE_RAW_PATH_PREFIX = "/SneakIrwin/SillyTavern-Mobile-apk/main/update/";
     private static final String UPDATE_MANIFEST_URL = "https://" + UPDATE_HOST + UPDATE_RAW_PATH_PREFIX + "latest.json";
@@ -69,6 +73,8 @@ public class MainActivity extends Activity {
     private static final String UPDATE_CALLBACK_TOKEN_EXTRA = "app.sillytavern.securemobile.UPDATE_CALLBACK_TOKEN";
     private static final String KEY_UPDATE_SESSION_ID = "update_session_id";
     private static final String KEY_UPDATE_CALLBACK_TOKEN = "update_callback_token";
+    private static final String KEY_UPDATE_MISSING_SINCE = "update_missing_since";
+    private static final String KEY_UPDATE_CONFIRMATION_LAUNCHED = "update_confirmation_launched";
     private static final int UPDATE_CONNECT_TIMEOUT_MS = 10000;
     private static final int UPDATE_READ_TIMEOUT_MS = 30000;
     private static final int UPDATE_MANIFEST_MAX_BYTES = 65536;
@@ -83,24 +89,39 @@ public class MainActivity extends Activity {
     private LinearLayout pairingPanel;
     private WebView webView;
     private TextView webStatus;
+    private TextView interruptionStatus;
     private EditText pairingInput;
     private Button forgetButton;
+    private Button updateRetryButton;
     private ValueCallback<Uri[]> fileCallback;
     private String pendingGatewayOrigin;
     private String pendingPairingPath;
     private boolean pendingMainFrameError;
     private boolean updateCheckStarted;
+    private boolean waitingForInstallPermission;
+    private boolean terminalUpdateCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         preferences = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String priorProcess = preferences.getString(KEY_SESSION_PROCESS, null);
+        boolean interrupted = priorProcess != null && !PROCESS_ID.equals(priorProcess);
+        preferences.edit().putString(KEY_SESSION_PROCESS, PROCESS_ID).commit();
+        waitingForInstallPermission = savedInstanceState != null
+                && savedInstanceState.getBoolean(STATE_WAITING_INSTALL_PERMISSION, false);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         WebView.setWebContentsDebuggingEnabled(false);
         buildLayout();
+        if (interrupted || (savedInstanceState != null
+                && savedInstanceState.getBoolean(STATE_INTERRUPTION_VISIBLE, false))) {
+            showInterruptionNotice();
+        }
         configureWebView();
         boolean startedPairing = handleIntent(getIntent());
-        checkForUpdateOnLaunch();
+        if (!waitingForInstallPermission && !terminalUpdateCallback) {
+            checkForUpdateOnLaunch(false);
+        }
         String gatewayOrigin = getGatewayOrigin();
         if (startedPairing) {
             return;
@@ -136,6 +157,31 @@ public class MainActivity extends Activity {
             webView.onResume();
         }
         dispatchHostLifecycleEvent(HOST_RESUME_SCRIPT);
+        if (waitingForInstallPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                && getPackageManager().canRequestPackageInstalls()) {
+            waitingForInstallPermission = false;
+            updateCheckStarted = false;
+            updateRetryButton.setVisibility(View.GONE);
+            checkForUpdateOnLaunch(true);
+        } else if (waitingForInstallPermission) {
+            updateRetryButton.setVisibility(View.VISIBLE);
+        }
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle state) {
+        state.putBoolean(STATE_WAITING_INSTALL_PERMISSION, waitingForInstallPermission);
+        state.putBoolean(STATE_INTERRUPTION_VISIBLE, interruptionStatus.getVisibility() == View.VISIBLE);
+        super.onSaveInstanceState(state);
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (isFinishing() && !isChangingConfigurations()
+                && PROCESS_ID.equals(preferences.getString(KEY_SESSION_PROCESS, null))) {
+            preferences.edit().remove(KEY_SESSION_PROCESS).apply();
+        }
+        super.onDestroy();
     }
 
     @Override
@@ -206,6 +252,30 @@ public class MainActivity extends Activity {
         webStatus.setBackgroundColor(Color.rgb(74, 24, 28));
         webStatus.setVisibility(View.GONE);
 
+        interruptionStatus = new TextView(this);
+        interruptionStatus.setText("The app or its web content was interrupted. Unsaved work or an in-progress generation may have been lost. Tap to dismiss.");
+        interruptionStatus.setTextColor(Color.WHITE);
+        interruptionStatus.setGravity(Gravity.CENTER);
+        interruptionStatus.setPadding(padding, dp(10), padding, dp(10));
+        interruptionStatus.setBackgroundColor(Color.rgb(74, 51, 24));
+        interruptionStatus.setVisibility(View.GONE);
+        interruptionStatus.setOnClickListener((view) -> interruptionStatus.setVisibility(View.GONE));
+
+        updateRetryButton = new Button(this);
+        updateRetryButton.setText("Retry update");
+        updateRetryButton.setVisibility(View.GONE);
+        updateRetryButton.setOnClickListener((view) -> {
+            updateRetryButton.setVisibility(View.GONE);
+            if (waitingForInstallPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                    && !getPackageManager().canRequestPackageInstalls()) {
+                openUnknownAppSourceSettings();
+            } else {
+                waitingForInstallPermission = false;
+                updateCheckStarted = false;
+                checkForUpdateOnLaunch(true);
+            }
+        });
+
         webView = createWebView();
 
         forgetButton = new Button(this);
@@ -219,6 +289,12 @@ public class MainActivity extends Activity {
             showPairingPanel();
         });
 
+        root.addView(interruptionStatus, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(updateRetryButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(pairingPanel);
         root.addView(webStatus, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -379,6 +455,7 @@ public class MainActivity extends Activity {
         webView = createWebView();
         root.addView(webView, childIndex >= 0 ? childIndex : Math.max(0, root.getChildCount() - 1));
         configureWebView();
+        showInterruptionNotice();
 
         if (interruptedUrl != null && isAllowedGatewayUri(Uri.parse(interruptedUrl))) {
             showWebView();
@@ -563,6 +640,10 @@ public class MainActivity extends Activity {
         webStatus.setVisibility(View.GONE);
     }
 
+    private void showInterruptionNotice() {
+        interruptionStatus.setVisibility(View.VISIBLE);
+    }
+
     private void showGatewayLoadFailed() {
         webStatus.setText(getString(R.string.gateway_load_failed));
         webStatus.setVisibility(View.VISIBLE);
@@ -600,8 +681,8 @@ public class MainActivity extends Activity {
         return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
     }
 
-    private void checkForUpdateOnLaunch() {
-        if (updateCheckStarted) {
+    private void checkForUpdateOnLaunch(boolean reportFailure) {
+        if (updateCheckStarted || hasOutstandingUpdateSession()) {
             return;
         }
         updateCheckStarted = true;
@@ -615,17 +696,29 @@ public class MainActivity extends Activity {
                 String actualSha256 = sha256Hex(apkFile);
                 if (!actualSha256.equals(manifest.sha256)) {
                     deleteQuietly(apkFile);
-                    runOnUiThread(() -> showUpdateVerifyFailed());
+                    runOnUiThread(() -> showUpdateVerifyFailed(reportFailure));
                     return;
                 }
                 if (!isDownloadedPackageExpected(apkFile, manifest)) {
                     deleteQuietly(apkFile);
-                    runOnUiThread(() -> showUpdateVerifyFailed());
+                    runOnUiThread(() -> showUpdateVerifyFailed(reportFailure));
                     return;
                 }
-                runOnUiThread(() -> promptInstallVerifiedUpdate(apkFile, manifest));
+                runOnUiThread(() -> {
+                    if (!isFinishing() && !isDestroyed()) {
+                        promptInstallVerifiedUpdate(apkFile, manifest);
+                    }
+                });
             } catch (Exception ignored) {
                 // Launch-time update checks must fail closed and keep the paired WebView usable.
+                if (reportFailure) {
+                    runOnUiThread(() -> {
+                        if (!isFinishing() && !isDestroyed()) {
+                            updateRetryButton.setVisibility(View.VISIBLE);
+                            Toast.makeText(this, getString(R.string.update_install_failed), Toast.LENGTH_LONG).show();
+                        }
+                    });
+                }
             }
         }, "st-mobile-update-check");
         updateThread.start();
@@ -765,7 +858,11 @@ public class MainActivity extends Activity {
     }
 
     private void promptInstallVerifiedUpdate(File apkFile, UpdateManifest manifest) {
+        if (hasOutstandingUpdateSession()) {
+            return;
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
+            waitingForInstallPermission = true;
             Toast.makeText(this, getString(R.string.update_install_permission_needed), Toast.LENGTH_LONG).show();
             openUnknownAppSourceSettings();
             return;
@@ -803,13 +900,17 @@ public class MainActivity extends Activity {
 
         int sessionId = installer.createSession(params);
         String callbackToken = UUID.randomUUID().toString();
-        preferences.edit()
-                .putInt(KEY_UPDATE_SESSION_ID, sessionId)
-                .putString(KEY_UPDATE_CALLBACK_TOKEN, callbackToken)
-                .apply();
         PackageInstaller.Session session = null;
         boolean committed = false;
         try {
+            if (!preferences.edit()
+                    .putInt(KEY_UPDATE_SESSION_ID, sessionId)
+                    .putString(KEY_UPDATE_CALLBACK_TOKEN, callbackToken)
+                    .remove(KEY_UPDATE_MISSING_SINCE)
+                    .putBoolean(KEY_UPDATE_CONFIRMATION_LAUNCHED, false)
+                    .commit()) {
+                throw new IOException("Could not persist update session identity");
+            }
             session = installer.openSession(sessionId);
             try (InputStream input = new BufferedInputStream(new FileInputStream(apkFile));
                  OutputStream output = session.openWrite("SillyTavern-Mobile-update.apk", 0, apkFile.length())) {
@@ -846,14 +947,23 @@ public class MainActivity extends Activity {
         int expectedSessionId = preferences.getInt(KEY_UPDATE_SESSION_ID, -1);
         String callbackToken = intent.getStringExtra(UPDATE_CALLBACK_TOKEN_EXTRA);
         String expectedCallbackToken = preferences.getString(KEY_UPDATE_CALLBACK_TOKEN, null);
-        if (sessionId < 0 || sessionId != expectedSessionId
-                || expectedCallbackToken == null || !expectedCallbackToken.equals(callbackToken)
-                || !isOwnedUpdateSession(sessionId)) {
+        if (!UpdateSessionPolicy.matches(expectedSessionId, expectedCallbackToken, sessionId, callbackToken)) {
             return;
         }
         int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
         if (status != PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            terminalUpdateCallback = true;
             clearExpectedUpdateCallback();
+            if (status != PackageInstaller.STATUS_SUCCESS) {
+                updateRetryButton.setVisibility(View.VISIBLE);
+                Toast.makeText(this, getString(R.string.update_install_failed), Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+        if (!isOwnedUpdateSession(sessionId)) {
+            return;
+        }
+        if (preferences.getBoolean(KEY_UPDATE_CONFIRMATION_LAUNCHED, false)) {
             return;
         }
         Intent confirmationIntent = intent.getParcelableExtra(Intent.EXTRA_INTENT);
@@ -861,10 +971,11 @@ public class MainActivity extends Activity {
             clearExpectedUpdateCallback();
             return;
         }
-        clearExpectedUpdateCallback();
         try {
             startActivity(confirmationIntent);
+            preferences.edit().putBoolean(KEY_UPDATE_CONFIRMATION_LAUNCHED, true).commit();
         } catch (ActivityNotFoundException error) {
+            clearExpectedUpdateCallback();
             Toast.makeText(this, getString(R.string.update_install_failed), Toast.LENGTH_LONG).show();
         }
     }
@@ -880,14 +991,48 @@ public class MainActivity extends Activity {
         return false;
     }
 
+    private boolean hasOutstandingUpdateSession() {
+        int sessionId = preferences.getInt(KEY_UPDATE_SESSION_ID, -1);
+        String token = preferences.getString(KEY_UPDATE_CALLBACK_TOKEN, null);
+        if (sessionId < 0 || token == null) {
+            return false;
+        }
+        boolean owned = isOwnedUpdateSession(sessionId);
+        long missingSince = preferences.getLong(KEY_UPDATE_MISSING_SINCE, 0);
+        if (owned && missingSince != 0) {
+            preferences.edit().remove(KEY_UPDATE_MISSING_SINCE).apply();
+            missingSince = 0;
+        } else if (!owned && missingSince <= 0) {
+            missingSince = System.currentTimeMillis();
+            preferences.edit().putLong(KEY_UPDATE_MISSING_SINCE, missingSince).commit();
+        }
+        if (UpdateSessionPolicy.blocksNewSession(owned, missingSince,
+                System.currentTimeMillis())) {
+            if (!owned) {
+                updateRetryButton.setVisibility(View.VISIBLE);
+            }
+            return true;
+        }
+        clearExpectedUpdateCallback();
+        return false;
+    }
+
     private void clearExpectedUpdateCallback() {
         preferences.edit()
                 .remove(KEY_UPDATE_SESSION_ID)
                 .remove(KEY_UPDATE_CALLBACK_TOKEN)
+                .remove(KEY_UPDATE_MISSING_SINCE)
+                .remove(KEY_UPDATE_CONFIRMATION_LAUNCHED)
                 .apply();
     }
 
-    private void showUpdateVerifyFailed() {
+    private void showUpdateVerifyFailed(boolean reportFailure) {
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        if (reportFailure) {
+            updateRetryButton.setVisibility(View.VISIBLE);
+        }
         Toast.makeText(this, getString(R.string.update_verify_failed), Toast.LENGTH_LONG).show();
     }
 

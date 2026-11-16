@@ -221,6 +221,9 @@ export function createStreamRelayManager(options) {
     }
     relays.delete(relay.id);
     totalBytes -= relay.length;
+    // A terminal replay may still be draining to a slow subscriber. Do not let
+    // that subscriber retain an evicted, no-longer-accounted replay buffer.
+    endSubscribers(relay, true);
     emit('removed', relay, { reason });
     if (preserveId) {
       recordTombstone(relay.id, relay.ownerTokenHash);
@@ -228,14 +231,72 @@ export function createStreamRelayManager(options) {
   }
 
   function endSubscribers(relay, destroy = false) {
-    for (const subscriber of relay.subscribers) {
+    for (const subscriber of [...relay.subscribers]) {
       if (destroy) {
+        detachSubscriber(relay, subscriber);
         subscriber.res.destroy();
-      } else if (!subscriber.res.destroyed) {
-        subscriber.res.end();
+      } else {
+        // Completion cannot end a response until its buffered backlog drains.
+        pumpSubscriber(relay, subscriber);
       }
     }
-    relay.subscribers.clear();
+  }
+
+  function detachSubscriber(relay, subscriber) {
+    relay.subscribers.delete(subscriber);
+    if (subscriber.onDrain) {
+      subscriber.res.off('drain', subscriber.onDrain);
+      subscriber.onDrain = null;
+    }
+  }
+
+  function pumpSubscriber(relay, subscriber) {
+    const { res } = subscriber;
+    if (!relay.subscribers.has(subscriber) || subscriber.onDrain) {
+      return;
+    }
+    if (res.destroyed || res.writableEnded) {
+      detachSubscriber(relay, subscriber);
+      return;
+    }
+
+    while (subscriber.offset < relay.length) {
+      const chunk = relay.chunks[subscriber.chunkIndex];
+      const end = chunk.start + chunk.data.length;
+      if (end <= subscriber.offset) {
+        subscriber.chunkIndex += 1;
+        continue;
+      }
+      // Replay buffers may be much larger than a socket's write queue. Feed
+      // both replay and live data through the same cursor, yielding on drain
+      // instead of dropping a healthy client for ordinary backpressure.
+      const from = subscriber.offset - chunk.start;
+      const writeBytes = Math.min(
+        chunk.data.length - from,
+        res.writableHighWaterMark,
+        Math.max(1, Math.floor(limits.maxSubscriberQueueBytes / 4)),
+      );
+      const slice = chunk.data.subarray(from, from + writeBytes);
+      const ready = res.write(slice);
+      subscriber.offset += slice.length;
+      if (res.writableLength > limits.maxSubscriberQueueBytes) {
+        detachSubscriber(relay, subscriber);
+        res.destroy();
+        return;
+      }
+      if (!ready) {
+        subscriber.onDrain = () => {
+          subscriber.onDrain = null;
+          pumpSubscriber(relay, subscriber);
+        };
+        res.once('drain', subscriber.onDrain);
+        return;
+      }
+    }
+    if (relay.state === 'complete') {
+      detachSubscriber(relay, subscriber);
+      res.end();
+    }
   }
 
   function finishRelay(relay, state, error = null) {
@@ -305,23 +366,12 @@ export function createStreamRelayManager(options) {
       return false;
     }
     const copy = Buffer.from(chunk);
-    const start = relay.length;
-    relay.chunks.push({ start, data: copy });
+    relay.chunks.push({ start: relay.length, data: copy });
     relay.length += copy.length;
     totalBytes += copy.length;
 
     for (const subscriber of [...relay.subscribers]) {
-      if (subscriber.offset !== start || subscriber.res.destroyed) {
-        subscriber.res.destroy();
-        relay.subscribers.delete(subscriber);
-        continue;
-      }
-      subscriber.res.write(copy);
-      subscriber.offset += copy.length;
-      if (subscriber.res.writableLength > limits.maxSubscriberQueueBytes) {
-        subscriber.res.destroy();
-        relay.subscribers.delete(subscriber);
-      }
+      pumpSubscriber(relay, subscriber);
     }
     return true;
   }
@@ -339,10 +389,13 @@ export function createStreamRelayManager(options) {
     relay.upstreamRequest = upstream;
     upstream.on('response', (upstreamRes) => {
       relay.upstreamResponse = upstreamRes;
+      upstreamRes.on('error', (error) => finishRelay(relay, 'failed', error));
       const contentEncoding = String(upstreamRes.headers['content-encoding'] ?? 'identity').toLowerCase();
       if (contentEncoding !== 'identity') {
-        upstreamRes.resume();
         finishRelay(relay, 'failed', new Error('Encoded upstream stream is not safe for byte replay'));
+        // The relay is terminal, so continuing to drain an indefinite encoded
+        // generation would leave an upstream request outside active limits.
+        upstreamRes.destroy();
         return;
       }
       relay.statusCode = upstreamRes.statusCode ?? 502;
@@ -355,7 +408,6 @@ export function createStreamRelayManager(options) {
       upstreamRes.on('data', (chunk) => appendChunk(relay, chunk));
       upstreamRes.on('end', () => finishRelay(relay, 'complete'));
       upstreamRes.on('aborted', () => finishRelay(relay, 'failed', new Error('Upstream response aborted')));
-      upstreamRes.on('error', (error) => finishRelay(relay, 'failed', error));
     });
     upstream.on('error', (error) => finishRelay(relay, 'failed', error));
     upstream.end(body);
@@ -423,32 +475,14 @@ export function createStreamRelayManager(options) {
       ...relay.headers,
       'x-st-mobile-relay-state': relay.state,
     });
-    const subscriber = { res, offset };
+    const subscriber = { res, offset, chunkIndex: 0, onDrain: null };
     emit('attached', relay, { offset });
-    for (const chunk of relay.chunks) {
-      const end = chunk.start + chunk.data.length;
-      if (end <= subscriber.offset) {
-        continue;
-      }
-      const slice = subscriber.offset > chunk.start
-        ? chunk.data.subarray(subscriber.offset - chunk.start)
-        : chunk.data;
-      res.write(slice);
-      subscriber.offset += slice.length;
-      if (res.writableLength > limits.maxSubscriberQueueBytes) {
-        res.destroy();
-        return;
-      }
-    }
-    if (relay.state === 'complete') {
-      res.end();
-      return;
-    }
     relay.subscribers.add(subscriber);
     res.once('close', () => {
-      relay.subscribers.delete(subscriber);
+      detachSubscriber(relay, subscriber);
       emit('detached', relay, { offset: subscriber.offset, reason: 'client-transport-closed' });
     });
+    pumpSubscriber(relay, subscriber);
   }
 
   async function handle(req, res, device) {

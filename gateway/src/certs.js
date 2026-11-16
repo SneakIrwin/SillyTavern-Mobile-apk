@@ -1,5 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { X509Certificate, createPrivateKey } from 'node:crypto';
+import { isIP } from 'node:net';
 import forge from 'node-forge';
 
 import { protectWindowsPrivatePathAcls } from './windows-acls.js';
@@ -91,15 +93,41 @@ export async function ensureCertificates({ certDir, hostnames = [] }) {
   const serverKeyPath = pemPath(certDir, 'st-mobile-server.key.pem');
   const metadataPath = pemPath(certDir, 'metadata.json');
 
-  if (!(await fileExists(caCertPath)) || !(await fileExists(caKeyPath))) {
+  const hasCaCert = await fileExists(caCertPath);
+  const hasCaKey = await fileExists(caKeyPath);
+  if (hasCaCert !== hasCaKey) {
+    throw new Error('Incomplete gateway CA identity; restore the missing certificate/key from backup instead of silently replacing paired-device trust');
+  }
+  if (!hasCaCert && ((await fileExists(serverCertPath)) || (await fileExists(serverKeyPath)))) {
+    throw new Error('Gateway server identity exists without its CA; restore the original CA identity from backup');
+  }
+  if (!hasCaCert) {
     const ca = createCaCertificate();
     await writeFile(caCertPath, forge.pki.certificateToPem(ca.cert), { encoding: 'utf8', mode: 0o600 });
     await writeFile(caKeyPath, forge.pki.privateKeyToPem(ca.privateKey), { encoding: 'utf8', mode: 0o600 });
     await protectWindowsPrivatePathAcls([certDir]);
   }
 
+  const caCertificate = new X509Certificate(await readFile(caCertPath));
+  if (!caCertificate.ca || !caCertificate.checkPrivateKey(createPrivateKey(await readFile(caKeyPath)))
+      || Date.parse(caCertificate.validTo) <= Date.now()) {
+    throw new Error('Gateway CA is invalid, expired or does not match its private key; restore the original valid identity');
+  }
+
   const names = [...new Set(['localhost', '127.0.0.1', ...hostnames.filter(Boolean)])];
   let regenerateServer = !(await fileExists(serverCertPath)) || !(await fileExists(serverKeyPath));
+  if (!regenerateServer) {
+    try {
+      const certificate = new X509Certificate(await readFile(serverCertPath));
+      regenerateServer = !certificate.verify(caCertificate.publicKey)
+        || !certificate.checkPrivateKey(createPrivateKey(await readFile(serverKeyPath)))
+        || Date.parse(certificate.validTo) <= Date.now() + 7 * 24 * 60 * 60 * 1000
+        || Date.parse(certificate.validFrom) > Date.now()
+        || names.some((name) => isIP(name) ? !certificate.checkIP(name) : !certificate.checkHost(name));
+    } catch {
+      regenerateServer = true;
+    }
+  }
 
   try {
     const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
